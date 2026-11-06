@@ -110,25 +110,25 @@
 ### Task 9: Real-Time Caption & Hook SEO Grader
 - **Description:** Implement scoring algorithm evaluating caption hooks (curiosity gap, question triggers, power words), character density, and visual preview of mobile "See more" fold cutoff.
 - **Acceptance criteria:**
-  - [ ] Hook score calculator (0 to 100) with actionable tips ("Add an opening question", "Shorten first sentence").
-  - [ ] Mobile preview showing exactly where text will be truncated on Instagram/X.
-  - [ ] Standalone `/seo-studio` tool and integrated side-panel inside Composer.
+  - [x] Hook score calculator (0 to 100) with actionable tips ("Add an opening question", "Shorten first sentence").
+  - [x] Mobile preview showing exactly where text will be truncated on Instagram/X.
+  - [x] Standalone `/seo-studio` tool and integrated side-panel inside Composer.
 - **Verification:** Unit test for `seo.service.ts` scoring logic.
-- **Files:** `src/services/seo.service.ts`, `src/components/seo/*.tsx`, `src/app/(dashboard)/seo-studio/page.tsx`
+- **Files:** `src/services/seo.service.ts`, `src/components/seo/*.tsx`, `src/app/seo-studio/page.tsx`
 - **Scope:** M
 
 ### Task 10: CamelCase Hashtag Optimizer & Image Alt-Text Generator
 - **Description:** Tool that converts raw hashtags into accessible CamelCase, classifies tags by volume tier, and generates keyword-rich alt-text for image accessibility and search indexing.
 - **Acceptance criteria:**
-  - [ ] CamelCase formatter converts `#digitalmarketingstrategy` to `#DigitalMarketingStrategy`.
-  - [ ] Hashtag category badge display (High Volume, Niche, Trending).
-  - [ ] Image alt-text generator incorporating target keywords.
+  - [x] CamelCase formatter converts `#digitalmarketingstrategy` to `#DigitalMarketingStrategy`.
+  - [x] Hashtag category badge display (High Volume, Niche, Trending).
+  - [x] Image alt-text generator incorporating target keywords.
 - **Verification:** User enters comma-separated hashtags and receives formatted, tagged recommendations.
 - **Files:** `src/components/seo/HashtagOptimizer.tsx`, `src/components/seo/AltTextAssistant.tsx`
 - **Scope:** S
 
 ### Checkpoint: SEO Studio Complete
-- [ ] Live SEO feedback and formatting components functional
+- [x] Live SEO feedback and formatting components functional
 
 ---
 
