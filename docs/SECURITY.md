@@ -142,3 +142,40 @@ Therefore, MediaConnect adopts the industry-standard **At-Least-Once Delivery wi
    - All targets succeeded $\rightarrow$ `status: "PUBLISHED"`.
    - Some targets succeeded, others failed $\rightarrow$ `status: "PARTIALLY_PUBLISHED"`.
    - All targets failed $\rightarrow$ `status: "FAILED"`.
+
+---
+
+## 7. Live Provider Architecture & OAuth 2.0 Security (Phase 6B)
+
+MediaConnect features a modular provider abstraction supporting both zero-cost local sandboxes and live social platform APIs:
+
+1. **OAuth 2.0 Cryptographic State Protection:**
+   - Authorization initiates at `/api/auth/connect/[provider]`.
+   - Generates a signed HMAC-SHA256 `state` parameter encapsulating `{ workspaceId, userId, platform, timestamp, nonce }`.
+   - Validated at `/api/auth/callback/[provider]` to guarantee:
+     - Anti-CSRF: The redirect matches the initiating browser session.
+     - Anti-Session Fixation: The redeeming user matches the state initiator.
+     - Tenant Integrity: Channel tokens are strictly bound to the authorized workspace.
+     - Replay Protection: 15-minute strict expiration window.
+
+2. **Live Adapter Implementations:**
+   - **YouTube Data API v3 (`YouTubeLiveProvider`):** Google OAuth 2.0 with `youtube.upload` and `yt-analytics.readonly` scopes; chunked resumable upload protocol; daily upload quota tracker enforcing Google's 100 `videos.insert`/day limit.
+   - **Instagram Graph API (`InstagramLiveProvider`):** Direct Instagram Login for creator and business accounts (no Facebook Page linkage required); short-lived to long-lived (60-day) token exchange; 2-step media container flow (`POST /{ig-user-id}/media` $\rightarrow$ `POST /{ig-user-id}/media_publish`); first-comment auto-posting.
+   - **X API v2 Guardrail (`XLiveProvider`):** Strict consumption-based billing guardrail. Automatically blocks live post writes ($0.015/post) with `PaidApiGuardrailError` unless `ALLOW_PAID_X_API="true"` is explicitly provided.
+
+3. **Reconciliation & Idempotency:**
+   - Every dispatch generates a deterministic `idempotencyKey` cached by the provider adapters to guarantee idempotent delivery under network retries.
+
+---
+
+## 8. Media Storage & Aspect Ratio Validation (Phase 6B)
+
+1. **Storage Abstraction (`StorageService`):**
+   - Pluggable `IStorageProvider`: `LocalStorageProvider` for zero-cost development/test; `S3CompatibleStorageProvider` for Cloudflare R2 / AWS S3 production storage.
+   - Directory traversal protection: Storage keys are sanitized and prefixed with workspace UUIDs.
+2. **Technical Compliance & Aspect Ratio Rules:**
+   - Size limits: 100MB for video, 10MB for images.
+   - YouTube Shorts & Instagram Reels: Strictly enforces vertical 9:16 aspect ratio (~0.5625) with duration caps (60s Shorts, 90s Reels).
+   - YouTube Long-form: 16:9 widescreen recommended with pillarbox warnings for non-standard aspect ratios.
+   - Instagram Feed: 1:1 square, 4:5 portrait, and 1.91:1 landscape validation.
+

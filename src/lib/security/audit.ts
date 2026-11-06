@@ -14,7 +14,9 @@ export type SecurityEventType =
   | "DISPATCH_TRIGGERED"
   | "DISPATCH_UNAUTHORIZED"
   | "UNAPPROVED_PUBLISH_BLOCKED"
-  | "SESSION_REVOKED";
+  | "SESSION_REVOKED"
+  | "OAUTH_CSRF_REJECTED"
+  | "CHANNEL_CONNECTED";
 
 export interface SecurityEventData {
   event: SecurityEventType;
@@ -25,7 +27,8 @@ export interface SecurityEventData {
   resourceId?: string;
   ip?: string;
   userAgent?: string;
-  details?: Record<string, any>;
+  type?: string;
+  details?: Record<string, unknown>;
 }
 
 export class SecurityAudit {
@@ -37,10 +40,20 @@ export class SecurityAudit {
     };
 
     // Output structured JSON log
-    if (data.event.includes("FAILURE") || data.event.includes("ATTEMPT") || data.event.includes("BLOCKED") || data.event.includes("TAMPER")) {
+    if (
+      data.event.includes("FAILURE") ||
+      data.event.includes("ATTEMPT") ||
+      data.event.includes("BLOCKED") ||
+      data.event.includes("TAMPER") ||
+      data.event.includes("REJECTED")
+    ) {
       console.warn(`[SECURITY ALERT] [${data.event}]`, JSON.stringify(logEntry));
     } else {
       console.info(`[SECURITY AUDIT] [${data.event}]`, JSON.stringify(logEntry));
     }
   }
+}
+
+export function auditSecurityEvent(data: SecurityEventData): void {
+  SecurityAudit.log(data);
 }

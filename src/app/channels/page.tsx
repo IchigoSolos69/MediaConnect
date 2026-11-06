@@ -265,14 +265,13 @@ export default function ChannelsPage() {
                         <span>{isConnecting ? "Connecting..." : "1-Click Mock Connect (Free)"}</span>
                       </button>
 
-                      <button
-                        disabled
-                        className="w-full flex items-center justify-center gap-1.5 bg-slate-900 text-slate-500 text-[11px] font-medium py-1.5 rounded-lg border border-slate-800/60 cursor-not-allowed"
-                        title="Add API credentials to .env to enable Live OAuth"
+                      <a
+                        href={`/api/auth/connect/${cfg.platform.toLowerCase()}`}
+                        className="w-full flex items-center justify-center gap-1.5 bg-slate-800/80 hover:bg-slate-800 text-slate-300 text-[11px] font-medium py-1.5 rounded-lg border border-slate-700/80 transition"
                       >
-                        <span>Live OAuth (Requires API keys)</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </button>
+                        <span>Initiate Live OAuth 2.0</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </a>
                     </div>
                   )}
                 </div>
