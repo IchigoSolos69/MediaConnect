@@ -165,3 +165,70 @@
 
 ### Final Checkpoint: Project Complete & Verified
 - [x] End-to-end verification completed (All 5 phases verified)
+
+---
+
+## Phase 6: Production Readiness & Enterprise Security
+
+### Milestone 6A: Security, Authentication, and Token Vault
+
+#### Task 14: Cryptographic Token Vault
+- **Description:** Implement AES-256-GCM encryption with unique 12-byte IV/nonce per encryption, 16-byte authTag, key versioning, tamper detection, and key rotation.
+- **Acceptance criteria:**
+  - [x] `TokenVault.encrypt(plaintext, keyVersion)` returns `v1:<iv>:<ciphertext>:<tag>`.
+  - [x] `TokenVault.decrypt(encryptedPayload)` successfully decrypts with corresponding version key.
+  - [x] Modifying ciphertext or authTag triggers `TamperDetectedError`.
+  - [x] Key rotation function `TokenVault.rotate(payload, targetVersion)` verified.
+- **Verification:** Unit test `src/test-token-vault.ts` passes.
+- **Files:** `src/lib/crypto/vault.ts`, `src/lib/crypto/__tests__/vault.test.ts`
+- **Scope:** M
+
+#### Task 15: Schema Migration & Plaintext Token Migration
+- **Description:** Introduce `WorkspaceMember` model, add `passwordHash` to `User`, update `Account` with token key versioning and approval fields on `Post`. Safely migrate existing plaintext tokens to encrypted ciphertext without resetting database.
+- **Acceptance criteria:**
+  - [x] Prisma schema updated with `WorkspaceMember` and password hash.
+  - [x] `npx prisma db push` executes cleanly without data loss.
+  - [x] Migration script encrypts all existing plaintext tokens and seeds test credentials for OWNER, APPROVER, and EDITOR roles.
+- **Verification:** Database contains encrypted tokens (`enc:v1:...`) and valid workspace memberships.
+- **Files:** `prisma/schema.prisma`, `prisma/seed.ts`, `src/scripts/migrate-tokens.ts`
+- **Scope:** M
+
+#### Task 16: Auth.js Session System & Documented RBAC Matrix
+- **Description:** Implement Auth.js with credentials provider (bcrypt password verification), session management, and role-based permissions matrix (`OWNER`, `APPROVER`, `EDITOR`).
+- **Acceptance criteria:**
+  - [x] Secure session creation with email/password authentication.
+  - [x] Role-based permission matrix mapping each role to allowed actions.
+  - [x] Application auth completely separated from social OAuth credentials.
+  - [x] Sign-in page at `/login` and session provider in layout.
+- **Verification:** Successful login yields verified session with active workspace membership.
+- **Files:** `src/auth.ts`, `src/lib/auth/permissions.ts`, `src/lib/auth/server.ts`, `src/app/login/page.tsx`
+- **Scope:** M
+
+#### Task 17: Multi-Tenant Server Authorization & API Sanitization
+- **Description:** Enforce strict server-side authorization on all API routes (`/api/accounts`, `/api/posts`, `/api/analytics`, `/api/workspaces`), reject cross-tenant requests, and strip tokens from all responses.
+- **Acceptance criteria:**
+  - [x] Unauthenticated requests return 401.
+  - [x] Requests to a workspace where user is not a member return 403 Forbidden.
+  - [x] Unauthorized actions (e.g. EDITOR attempting to disconnect account) return 403.
+  - [x] Account tokens are never exposed in any API response or serialized state.
+- **Verification:** API audit tests pass with 401/403 responses on unauthorized attempts.
+- **Files:** `src/app/api/accounts/route.ts`, `src/app/api/posts/route.ts`, `src/app/api/analytics/route.ts`, `src/lib/auth/server.ts`
+- **Scope:** M
+
+#### Task 18: Automated Security & Tenant Isolation Test Suite
+- **Description:** Build automated test script validating authentication, authorization, cross-tenant isolation, role boundaries, token encryption, tamper detection, and key rotation.
+- **Acceptance criteria:**
+  - [x] Test 1: Unauthenticated access rejected with 401.
+  - [x] Test 2: Cross-tenant access rejected with 403.
+  - [x] Test 3: Role escalation (EDITOR disconnecting channel) rejected with 403.
+  - [x] Test 4: Token vault encryption, decryption, and tamper detection pass.
+  - [x] Test 5: Key rotation from v1 to v2 verified.
+  - [x] Test 6: Zero plaintext tokens in database or API responses.
+- **Verification:** `npx tsx src/test-milestone-6a.ts` passes all tests with exit code 0.
+- **Files:** `src/test-milestone-6a.ts`
+- **Scope:** M
+
+### Checkpoint: Milestone 6A Security Complete
+- [x] All 6A acceptance criteria verified
+- [x] Production build succeeds (`npm run build`)
+- [ ] Approval gate: Present audit results before proceeding to 6B

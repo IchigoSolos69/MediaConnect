@@ -1,14 +1,45 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { PlusCircle } from "lucide-react";
+import { PlusCircle, LogOut } from "lucide-react";
 import { YouTubeIcon, InstagramIcon, XIcon } from "@/components/icons";
 
 interface TopBarProps {
   title?: string;
 }
 
+interface UserSessionInfo {
+  name: string;
+  email: string;
+  role: string;
+  workspaceName: string;
+}
+
 export function TopBar({ title }: TopBarProps) {
+  const [session, setSession] = useState<UserSessionInfo | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/session")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.session) {
+          setSession({
+            name: data.session.name,
+            email: data.session.email,
+            role: data.session.activeWorkspace.role,
+            workspaceName: data.session.activeWorkspace.name,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch("/api/auth/session", { method: "POST" });
+    window.location.href = "/login";
+  };
+
   return (
     <header className="h-16 border-b border-slate-800 bg-slate-950/70 backdrop-blur-md px-8 flex items-center justify-between shrink-0 sticky top-0 z-20">
       <div>
@@ -51,15 +82,28 @@ export function TopBar({ title }: TopBarProps) {
           <span>New Post</span>
         </Link>
 
-        {/* User Profile Pill */}
+        {/* User Profile Pill & Role Badge */}
         <div className="flex items-center gap-2.5 pl-2 border-l border-slate-800">
           <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-500 border border-indigo-400/30 flex items-center justify-center text-xs font-bold text-white shadow-inner">
-            A
+            {session ? session.name[0] : "A"}
           </div>
           <div className="hidden lg:block text-left">
-            <span className="text-xs font-medium text-white block leading-none">Adi</span>
-            <span className="text-[10px] text-slate-400 block leading-tight mt-0.5">Workspace Owner</span>
+            <span className="text-xs font-medium text-white block leading-none">
+              {session ? session.name : "Alice Owner"}
+            </span>
+            <span className="text-[10px] text-indigo-400 font-mono block leading-tight mt-0.5">
+              {session ? `${session.role}` : "OWNER"}
+            </span>
           </div>
+
+          {/* Switch User / Logout button */}
+          <Link
+            href="/login"
+            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition ml-1"
+            title="Switch User / Login"
+          >
+            <LogOut className="w-4 h-4" />
+          </Link>
         </div>
       </div>
     </header>

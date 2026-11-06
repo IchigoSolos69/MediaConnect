@@ -1,41 +1,50 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+} from "@/lib/auth/server";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const workspace = await db.workspace.findFirst();
-    if (!workspace) {
-      return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-    }
+    const session = await authenticateRequest(request);
+    const { searchParams } = new URL(request.url);
+    const requestedWorkspaceId = searchParams.get("workspaceId") || session.activeWorkspaceId;
+
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      requestedWorkspaceId,
+      "analytics:view"
+    );
 
     const competitors = await db.competitor.findMany({
-      where: { workspaceId: workspace.id },
+      where: { workspaceId: membership.workspaceId },
       orderBy: { followersCount: "desc" },
     });
 
     return NextResponse.json({ success: true, competitors });
   } catch (error: any) {
-    console.error("Error fetching competitors:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Failed to fetch competitors" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await authenticateRequest(request);
     const body = await request.json();
-    const { platform, username, displayName, followersCount, engagementRate } = body;
+    const { platform, username, displayName, followersCount, engagementRate, workspaceId: reqWorkspaceId } = body;
 
-    const workspace = await db.workspace.findFirst();
-    if (!workspace) {
-      return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-    }
+    const targetWorkspaceId = reqWorkspaceId || session.activeWorkspaceId;
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      targetWorkspaceId,
+      "workspace:manage"
+    );
 
     const competitor = await db.competitor.create({
       data: {
-        workspaceId: workspace.id,
+        workspaceId: membership.workspaceId,
         platform: platform || "X",
         username,
         displayName: displayName || username,
@@ -47,10 +56,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, competitor });
   } catch (error: any) {
-    console.error("Error creating competitor:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Failed to add competitor" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }

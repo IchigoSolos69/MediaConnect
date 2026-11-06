@@ -1,20 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
 import { AnalyticsService } from "@/services/analytics.service";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+} from "@/lib/auth/server";
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await authenticateRequest(request);
+
     const { searchParams } = new URL(request.url);
     const days = parseInt(searchParams.get("days") || "14", 10);
     const platform = searchParams.get("platform") || "ALL";
+    const requestedWorkspaceId = searchParams.get("workspaceId") || session.activeWorkspaceId;
 
-    const workspace = await db.workspace.findFirst();
-    if (!workspace) {
-      return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-    }
+    // Enforce workspace authorization
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      requestedWorkspaceId,
+      "analytics:view"
+    );
 
     const [overview, heatmap] = await Promise.all([
-      AnalyticsService.getOverview(workspace.id, days),
+      AnalyticsService.getOverview(membership.workspaceId, days),
       AnalyticsService.getAudienceHeatmap(platform),
     ]);
 
@@ -24,10 +33,6 @@ export async function GET(request: NextRequest) {
       heatmap,
     });
   } catch (error: any) {
-    console.error("Error fetching analytics:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Failed to fetch analytics" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }

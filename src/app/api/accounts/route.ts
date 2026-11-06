@@ -1,22 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSocialProvider, SocialPlatform } from "@/providers";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+  sanitizeAccount,
+} from "@/lib/auth/server";
+import { TokenVault } from "@/lib/crypto/vault";
 
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    let workspaceId = searchParams.get("workspaceId");
+    const session = await authenticateRequest(request);
 
-    if (!workspaceId) {
-      const defaultWorkspace = await db.workspace.findFirst();
-      if (!defaultWorkspace) {
-        return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-      }
-      workspaceId = defaultWorkspace.id;
-    }
+    const { searchParams } = new URL(request.url);
+    const requestedWorkspaceId = searchParams.get("workspaceId") || session.activeWorkspaceId;
+
+    // Enforce workspace membership authorization
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      requestedWorkspaceId,
+      "analytics:view"
+    );
 
     const accounts = await db.account.findMany({
-      where: { workspaceId },
+      where: { workspaceId: membership.workspaceId },
       include: {
         _count: {
           select: {
@@ -28,15 +36,19 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: "asc" },
     });
 
-    return NextResponse.json({ success: true, accounts });
+    // Zero-token leak: sanitize all returned account records
+    const safeAccounts = accounts.map(sanitizeAccount);
+
+    return NextResponse.json({ success: true, accounts: safeAccounts });
   } catch (error) {
-    console.error("Error fetching accounts:", error);
-    return NextResponse.json({ success: false, error: "Failed to fetch accounts" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await authenticateRequest(request);
+
     const body = await request.json();
     const { platform, workspaceId: reqWorkspaceId } = body as {
       platform: SocialPlatform;
@@ -50,14 +62,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let workspaceId = reqWorkspaceId;
-    if (!workspaceId) {
-      const defaultWorkspace = await db.workspace.findFirst();
-      if (!defaultWorkspace) {
-        return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-      }
-      workspaceId = defaultWorkspace.id;
-    }
+    const targetWorkspaceId = reqWorkspaceId || session.activeWorkspaceId;
+
+    // Enforce permission: only OWNER can connect/manage social accounts
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      targetWorkspaceId,
+      "channels:connect"
+    );
 
     const provider = getSocialProvider(platform, "mock");
     const mockAuth = await provider.exchangeCode("mock_code");
@@ -65,26 +77,42 @@ export async function POST(request: NextRequest) {
     // Upsert the account
     const existing = await db.account.findFirst({
       where: {
-        workspaceId,
+        workspaceId: membership.workspaceId,
         platform,
       },
     });
 
     let account;
     if (existing) {
+      // Encrypt token before saving to vault
+      const encryptedAccess = TokenVault.encrypt(mockAuth.accessToken, existing.id, "v1");
+      const encryptedRefresh = mockAuth.refreshToken
+        ? TokenVault.encrypt(mockAuth.refreshToken, existing.id, "v1")
+        : null;
+
       account = await db.account.update({
         where: { id: existing.id },
         data: {
           status: "ACTIVE",
-          accessToken: mockAuth.accessToken,
+          accessToken: encryptedAccess,
+          refreshToken: encryptedRefresh,
+          tokenKeyVersion: "v1",
           followersCount: mockAuth.followersCount,
           updatedAt: new Date(),
         },
       });
     } else {
+      // Generate account ID first to bind AAD cryptographically
+      const newAccountId = `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const encryptedAccess = TokenVault.encrypt(mockAuth.accessToken, newAccountId, "v1");
+      const encryptedRefresh = mockAuth.refreshToken
+        ? TokenVault.encrypt(mockAuth.refreshToken, newAccountId, "v1")
+        : null;
+
       account = await db.account.create({
         data: {
-          workspaceId,
+          id: newAccountId,
+          workspaceId: membership.workspaceId,
           platform,
           platformAccountId: mockAuth.platformAccountId,
           username: mockAuth.username,
@@ -93,14 +121,15 @@ export async function POST(request: NextRequest) {
           followersCount: mockAuth.followersCount,
           status: "ACTIVE",
           isMock: true,
-          accessToken: mockAuth.accessToken,
+          accessToken: encryptedAccess,
+          refreshToken: encryptedRefresh,
+          tokenKeyVersion: "v1",
         },
       });
     }
 
-    return NextResponse.json({ success: true, account });
+    return NextResponse.json({ success: true, account: sanitizeAccount(account) });
   } catch (error) {
-    console.error("Error connecting account:", error);
-    return NextResponse.json({ success: false, error: "Failed to connect account" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }

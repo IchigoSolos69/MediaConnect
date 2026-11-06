@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { getSocialProvider } from "@/providers";
+import { TokenVault } from "@/lib/crypto/vault";
 
 export class PublisherService {
   /**
@@ -42,6 +43,11 @@ export class PublisherService {
       videoTags: target.videoTags,
     };
 
+    // Safely decrypt the token from the vault envelope just-in-time
+    const decryptedAccessToken = target.account.accessToken
+      ? TokenVault.decrypt(target.account.accessToken, target.account.id)
+      : null;
+
     const result = await provider.publishPost(
       {
         id: target.account.id,
@@ -50,7 +56,7 @@ export class PublisherService {
         username: target.account.username,
         displayName: target.account.displayName,
         isMock: target.account.isMock,
-        accessToken: target.account.accessToken,
+        accessToken: decryptedAccessToken,
       },
       payload
     );

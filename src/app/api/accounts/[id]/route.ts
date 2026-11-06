@@ -1,25 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+  sanitizeAccount,
+} from "@/lib/auth/server";
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await authenticateRequest(request);
     const { id } = await params;
 
-    // Soft disconnect: update status to DISCONNECTED or remove
+    const account = await db.account.findUnique({
+      where: { id },
+    });
+
+    if (!account) {
+      return NextResponse.json({ success: false, error: "Account not found" }, { status: 404 });
+    }
+
+    // Enforce permission: user must be an OWNER in this account's workspace
+    await authorizeWorkspaceAccess(session.userId, account.workspaceId, "channels:connect");
+
     await db.account.delete({
       where: { id },
     });
 
     return NextResponse.json({ success: true, message: "Account disconnected" });
   } catch (error) {
-    console.error("Error disconnecting account:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to disconnect account" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }
 
@@ -28,21 +41,28 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await authenticateRequest(request);
     const { id } = await params;
     const body = await request.json();
     const { status } = body;
 
-    const account = await db.account.update({
+    const account = await db.account.findUnique({
+      where: { id },
+    });
+
+    if (!account) {
+      return NextResponse.json({ success: false, error: "Account not found" }, { status: 404 });
+    }
+
+    await authorizeWorkspaceAccess(session.userId, account.workspaceId, "channels:connect");
+
+    const updated = await db.account.update({
       where: { id },
       data: { status },
     });
 
-    return NextResponse.json({ success: true, account });
+    return NextResponse.json({ success: true, account: sanitizeAccount(updated) });
   } catch (error) {
-    console.error("Error updating account:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to update account" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }

@@ -54,8 +54,36 @@ MediaConnect is an all-in-one social media management, visual scheduling, analyt
 - [ ] Task 13: Exportable Client Reports (Print / PDF ready)
 
 ### Checkpoint: Full Platform Verification
-- [ ] End-to-end flow verified from connection to scheduling, SEO optimization, and analytics
-- [ ] Zero runtime console errors, clean build, and 100% free local execution
+- [x] End-to-end flow verified from connection to scheduling, SEO optimization, and analytics
+- [x] Zero runtime console errors, clean build, and 100% free local execution
+
+### Phase 6: Production Readiness & Enterprise Security
+
+#### Milestone 6A: Security, Authentication, and Token Vault (Active)
+- [ ] Task 14: Cryptographic Token Vault (AES-256-GCM, unique IV, AuthTag, Key Versioning, Key Rotation)
+- [ ] Task 15: Schema Migration & Plaintext Token Migration (WorkspaceMember, User passwordHash, encrypted Account tokens)
+- [ ] Task 16: Auth.js Session System & Documented RBAC Matrix (OWNER, APPROVER, EDITOR)
+- [ ] Task 17: Multi-Tenant Server Authorization & API Sanitization (Zero token leaks, cross-tenant isolation)
+- [ ] Task 18: Automated Security & Tenant Isolation Test Suite (Auth rejection, cross-tenant denial, role enforcement, tamper detection)
+
+### Checkpoint: Milestone 6A Security Verification
+- [ ] All security tests pass
+- [ ] Zero plaintext tokens in database or API responses
+- [ ] Cross-tenant access attempts cleanly rejected (401/403)
+- [ ] Full build succeeds without errors
+- [ ] Approval gate: Review with user before proceeding to 6B
+
+#### Milestone 6B: Direct Storage & Social Adapters (Upcoming)
+- Media Uploads: Cloudflare R2 / S3 presigned URLs with aspect ratio validation.
+- YouTube Live Adapter: 100 `videos.insert` quota compliance, resumable upload.
+- Instagram Live Adapter: Instagram Login vs Facebook Login evaluation, containerized publishing.
+- X Live Adapter: Consumption-based billing disclaimer, mock mode preservation.
+- Publishing Reliability: Upstash QStash / Redis distributed locks with retry policy.
+
+#### Milestone 6C: Analytics Sync & PDF Generation (Upcoming)
+- YouTube Analytics & Instagram Insights sync into MetricSnapshot.
+- Configurable Gemini model integration for SEO.
+- Server-side PDF export via `@react-pdf/renderer`.
 
 ---
 

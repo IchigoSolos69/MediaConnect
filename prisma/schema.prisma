@@ -11,14 +11,15 @@ datasource db {
 }
 
 model Workspace {
-  id          String        @id @default(cuid())
+  id          String            @id @default(cuid())
   name        String
-  slug        String        @unique
+  slug        String            @unique
   avatarUrl   String?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
 
   users       User[]
+  members     WorkspaceMember[]
   accounts    Account[]
   posts       Post[]
   competitors Competitor[]
@@ -26,15 +27,33 @@ model Workspace {
 }
 
 model User {
-  id          String     @id @default(cuid())
-  email       String     @unique
-  name        String
-  role        String     @default("OWNER") // OWNER, EDITOR, VIEWER
-  avatarUrl   String?
+  id           String            @id @default(cuid())
+  email        String            @unique
+  name         String
+  passwordHash String?           // Bcrypt hash for credentials login
+  avatarUrl    String?
+  role         String            @default("OWNER") // Legacy top-level role fallback
+  workspaceId  String?           // Legacy primary workspace reference
+  workspace    Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  memberships  WorkspaceMember[]
+}
+
+model WorkspaceMember {
+  id          String    @id @default(cuid())
   workspaceId String
-  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String    @default("EDITOR") // OWNER, APPROVER, EDITOR
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index([workspaceId])
 }
 
 model Account {
@@ -49,8 +68,9 @@ model Account {
   followersCount    Int               @default(0)
   followingCount    Int               @default(0)
   postsCount        Int               @default(0)
-  accessToken       String?
-  refreshToken      String?
+  accessToken       String?           // AES-256-GCM encrypted envelope (enc:v1:iv:ciphertext:tag)
+  refreshToken      String?           // AES-256-GCM encrypted envelope
+  tokenKeyVersion   String?           @default("v1")
   tokenExpiresAt    DateTime?
   isMock            Boolean           @default(true)
   status            String            @default("ACTIVE") // ACTIVE, EXPIRED, ERROR
@@ -64,21 +84,25 @@ model Account {
 }
 
 model Post {
-  id          String        @id @default(cuid())
-  workspaceId String
-  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  title       String?
-  content     String
-  mediaUrls   String        @default("[]") // JSON string array of image/video URLs
-  status      String        @default("DRAFT") // DRAFT, SCHEDULED, PUBLISHING, PUBLISHED, FAILED
-  scheduledAt DateTime?
-  publishedAt DateTime?
-  seoScore    Int?          @default(0)
-  hookScore   Int?          @default(0)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  id             String        @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  authorId       String?       // User ID who authored the post
+  title          String?
+  content        String
+  mediaUrls      String        @default("[]") // JSON string array of image/video URLs
+  status         String        @default("DRAFT") // DRAFT, SCHEDULED, PUBLISHING, PUBLISHED, FAILED
+  approvalStatus String        @default("APPROVED") // DRAFT, PENDING_APPROVAL, APPROVED, REJECTED
+  approvedById   String?
+  approvedAt     DateTime?
+  scheduledAt    DateTime?
+  publishedAt    DateTime?
+  seoScore       Int?          @default(0)
+  hookScore      Int?          @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
-  targets     PostTarget[]
+  targets        PostTarget[]
 }
 
 model PostTarget {

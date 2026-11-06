@@ -1,18 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { PublisherService } from "@/services/publisher.service";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+} from "@/lib/auth/server";
+import { hasPermission } from "@/lib/auth/permissions";
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await authenticateRequest(request);
     const { searchParams } = new URL(request.url);
+    const requestedWorkspaceId = searchParams.get("workspaceId") || session.activeWorkspaceId;
     const status = searchParams.get("status");
 
-    const defaultWorkspace = await db.workspace.findFirst();
-    if (!defaultWorkspace) {
-      return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
-    }
+    // Enforce workspace membership
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      requestedWorkspaceId,
+      "analytics:view"
+    );
 
-    const where: any = { workspaceId: defaultWorkspace.id };
+    const where: any = { workspaceId: membership.workspaceId };
     if (status) where.status = status;
 
     const posts = await db.post.findMany({
@@ -20,7 +30,18 @@ export async function GET(request: NextRequest) {
       include: {
         targets: {
           include: {
-            account: true,
+            account: {
+              select: {
+                id: true,
+                platform: true,
+                username: true,
+                displayName: true,
+                avatarUrl: true,
+                followersCount: true,
+                status: true,
+                isMock: true,
+              },
+            },
           },
         },
       },
@@ -29,23 +50,25 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, posts });
   } catch (error) {
-    console.error("Error fetching posts:", error);
-    return NextResponse.json({ success: false, error: "Failed to fetch posts" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await authenticateRequest(request);
+
     const body = await request.json();
     const {
       title,
       content,
       mediaUrls,
       scheduleMode, // "NOW" | "SCHEDULE" | "QUEUE" | "DRAFT"
-      scheduledDate, // ISO string or timestamp
-      targets, // Array of { accountId, platform, customContent, firstComment, videoTitle, videoTags }
+      scheduledDate,
+      targets,
       seoScore,
       hookScore,
+      workspaceId: reqWorkspaceId,
     } = body;
 
     if (!content || !targets || targets.length === 0) {
@@ -55,34 +78,61 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const defaultWorkspace = await db.workspace.findFirst();
-    if (!defaultWorkspace) {
-      return NextResponse.json({ success: false, error: "No workspace found" }, { status: 404 });
+    const targetWorkspaceId = reqWorkspaceId || session.activeWorkspaceId;
+
+    // Verify workspace membership and basic post creation right
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      targetWorkspaceId,
+      "posts:create"
+    );
+
+    // Enforce Role Permissions for Scheduling vs Drafting
+    const canPublish = hasPermission(membership.role, "posts:publish_now");
+    const canApprove = hasPermission(membership.role, "posts:approve");
+
+    if (scheduleMode === "NOW" && !canPublish) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Permission denied: Role [${membership.role}] cannot immediately publish posts. Submit for approval instead.`,
+        },
+        { status: 403 }
+      );
     }
 
     let finalScheduledAt: Date | null = null;
     let initialStatus = "DRAFT";
+    let approvalStatus = "APPROVED";
 
-    if (scheduleMode === "NOW") {
+    if (!canApprove && (scheduleMode === "SCHEDULE" || scheduleMode === "QUEUE")) {
+      // Editor submitted scheduled post -> requires approval
+      approvalStatus = "PENDING_APPROVAL";
+      initialStatus = "DRAFT";
+      finalScheduledAt = scheduledDate ? new Date(scheduledDate) : null;
+    } else if (scheduleMode === "NOW") {
       finalScheduledAt = new Date();
       initialStatus = "SCHEDULED";
+      approvalStatus = "APPROVED";
     } else if (scheduleMode === "SCHEDULE") {
       finalScheduledAt = scheduledDate ? new Date(scheduledDate) : new Date();
       initialStatus = "SCHEDULED";
+      approvalStatus = "APPROVED";
     } else if (scheduleMode === "QUEUE") {
-      finalScheduledAt = await PublisherService.getNextQueueSlot(defaultWorkspace.id);
+      finalScheduledAt = await PublisherService.getNextQueueSlot(membership.workspaceId);
       initialStatus = "SCHEDULED";
-    } else {
-      initialStatus = "DRAFT";
+      approvalStatus = "APPROVED";
     }
 
     const post = await db.post.create({
       data: {
-        workspaceId: defaultWorkspace.id,
+        workspaceId: membership.workspaceId,
+        authorId: session.userId,
         title,
         content,
         mediaUrls: JSON.stringify(mediaUrls || []),
         status: initialStatus,
+        approvalStatus,
         scheduledAt: finalScheduledAt,
         seoScore: seoScore || 0,
         hookScore: hookScore || 0,
@@ -103,15 +153,13 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // If scheduleMode === "NOW", immediately publish
-    if (scheduleMode === "NOW") {
+    if (scheduleMode === "NOW" && canPublish) {
       const published = await PublisherService.publishPostNow(post.id);
       return NextResponse.json({ success: true, post: published });
     }
 
     return NextResponse.json({ success: true, post });
   } catch (error) {
-    console.error("Error creating post:", error);
-    return NextResponse.json({ success: false, error: "Failed to create post" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }

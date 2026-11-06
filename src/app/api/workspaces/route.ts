@@ -1,26 +1,36 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { authenticateRequest, handleAuthApiError } from "@/lib/auth/server";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const workspaces = await db.workspace.findMany({
+    const session = await authenticateRequest(request);
+
+    // Only return workspaces the authenticated user is an explicit member of
+    const memberships = await db.workspaceMember.findMany({
+      where: { userId: session.userId },
       include: {
-        _count: {
-          select: {
-            accounts: true,
-            posts: true,
+        workspace: {
+          include: {
+            _count: {
+              select: {
+                accounts: true,
+                posts: true,
+              },
+            },
           },
         },
       },
       orderBy: { createdAt: "asc" },
     });
 
+    const workspaces = memberships.map((m) => ({
+      ...m.workspace,
+      userRole: m.role,
+    }));
+
     return NextResponse.json({ success: true, workspaces });
   } catch (error) {
-    console.error("Error fetching workspaces:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to fetch workspaces" },
-      { status: 500 }
-    );
+    return handleAuthApiError(error);
   }
 }

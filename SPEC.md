@@ -9,17 +9,19 @@ MediaConnect is an all-in-one social media management, visual scheduling, analyt
 
 ---
 
-## 2. Tech Stack & Free-Tier Ecosystem
+## 2. Tech Stack & Platform Constraints
 
-| Component | Technology | Free Tier / Cost Strategy |
+| Component | Technology | Operational Reality & Free Tier Strategy |
 | :--- | :--- | :--- |
 | **Framework** | Next.js 15 (App Router, React 19, TypeScript) | Open Source (MIT) |
-| **Styling & UI** | Tailwind CSS v4, Lucide React, Shadcn/Radix UI | Open Source |
-| **Database** | PostgreSQL + Prisma ORM | Local Postgres / Neon Free Tier (0.5 GiB free) |
-| **Queue & Scheduling** | BullMQ + Redis (ioredis) | Local Redis / Upstash Free Tier (10k cmd/day) + Local Polling Fallback |
-| **Storage** | Local file storage (Dev) / Cloudflare R2 (Prod) | 10 GB free tier on Cloudflare R2 |
-| **AI & SEO Engine** | Hybrid: Deterministic heuristics + Gemini API | Gemini API Free Tier (15 RPM free) |
-| **Social Adapters** | Dual Mode: Mock Sandbox Engine + Real OAuth2/REST | $0 local mock development without API approval gates |
+| **Styling & UI** | Tailwind CSS v4, Lucide React | Open Source |
+| **Authentication** | Auth.js (NextAuth v5) + bcryptjs | Secure server-side session cookies, separate from social OAuth |
+| **Token Vault** | AES-256-GCM + Key Versioning | Authenticated encryption with unique IV per record, zero plaintext exposure |
+| **Database** | PostgreSQL + Prisma ORM | SQLite locally ($0) / Neon / Supabase free tier in production |
+| **Queue & Scheduling** | Upstash QStash / BullMQ + Redis | Local interval runner ($0) / Upstash free tier (500 cron msgs/day) |
+| **Storage** | Cloudflare R2 / S3 Presigned URLs | 10 GB free tier on Cloudflare R2 |
+| **AI & SEO Engine** | Configurable LLM (Google Gemini / OpenAI) | Configurable model identifier (`GEMINI_MODEL`, e.g. `gemini-1.5-flash`) |
+| **Social Adapters** | Dual Mode: Mock Sandbox Engine + Live OAuth | **YouTube:** 100 `videos.insert` calls/day under current quota rules.<br>**Instagram:** Evaluates both Instagram Login (no FB page required) and Facebook Login.<br>**X (Twitter):** Consumption-based pricing (~$0.015/post creation). Mock mode default; requires explicit billing authorization before paid calls. |
 
 ---
 
@@ -59,10 +61,23 @@ Every provider (YouTube, Instagram, X) implements a unified interface:
 
 ## 4. Key Functional Modules
 
-### M1: Workspaces & Accounts (`/workspace`)
-- Multi-brand workspace switcher (Metricool style).
-- Connected accounts list with status badges (Healthy, Expired, Rate-limited).
-- One-click account connection with toggle between **Mock Demo Accounts** and **Live OAuth Accounts**.
+### M1: Workspaces, Security & Authentication (`/workspace`)
+- **Authentication:** Auth.js (NextAuth v5) with secure session validation. Application auth is strictly isolated from social-provider OAuth credentials.
+- **Explicit Multi-Tenancy:** Users access resources solely through verified `WorkspaceMember` records. Client-provided workspace IDs are never trusted blindly.
+- **Role-Based Access Control (RBAC):**
+  | Action | OWNER | APPROVER | EDITOR |
+  | :--- | :---: | :---: | :---: |
+  | Manage Workspace & Members | ✅ | ❌ | ❌ |
+  | Connect / Disconnect Social Accounts | ✅ | ❌ | ❌ |
+  | Create Draft Posts | ✅ | ✅ | ✅ |
+  | Edit Own Drafts | ✅ | ✅ | ✅ |
+  | Edit All Posts | ✅ | ✅ | ❌ |
+  | Submit Post for Approval | ✅ | ✅ | ✅ |
+  | Approve / Reject Posts | ✅ | ✅ | ❌ |
+  | Publish Post Immediately | ✅ | ✅ | ❌ |
+  | View Analytics & Heatmaps | ✅ | ✅ | ✅ |
+  | Export White-Label Client Reports | ✅ | ✅ | ❌ |
+- **Token Vault:** AES-256-GCM encryption with unique 12-byte IV per token, 16-byte authenticated authTag, key versioning (`v1:<iv>:<ciphertext>:<tag>`), and automatic rotation support. Plaintext tokens are stripped from all API responses.
 
 ### M2: Visual Planner & Calendar (`/planner`)
 - Monthly, weekly, and daily calendar views.
