@@ -1,0 +1,149 @@
+// Prisma schema for MediaConnect
+// Supports SQLite locally (zero config, zero cost) and PostgreSQL in production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id          String        @id @default(cuid())
+  name        String
+  slug        String        @unique
+  avatarUrl   String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  users       User[]
+  accounts    Account[]
+  posts       Post[]
+  competitors Competitor[]
+  queueSlots  QueueSlot[]
+}
+
+model User {
+  id          String     @id @default(cuid())
+  email       String     @unique
+  name        String
+  role        String     @default("OWNER") // OWNER, EDITOR, VIEWER
+  avatarUrl   String?
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model Account {
+  id                String            @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform          String            // YOUTUBE, INSTAGRAM, X
+  platformAccountId String
+  username          String
+  displayName       String
+  avatarUrl         String?
+  followersCount    Int               @default(0)
+  followingCount    Int               @default(0)
+  postsCount        Int               @default(0)
+  accessToken       String?
+  refreshToken      String?
+  tokenExpiresAt    DateTime?
+  isMock            Boolean           @default(true)
+  status            String            @default("ACTIVE") // ACTIVE, EXPIRED, ERROR
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  postTargets       PostTarget[]
+  metrics           MetricSnapshot[]
+
+  @@unique([workspaceId, platform, platformAccountId])
+}
+
+model Post {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  title       String?
+  content     String
+  mediaUrls   String        @default("[]") // JSON string array of image/video URLs
+  status      String        @default("DRAFT") // DRAFT, SCHEDULED, PUBLISHING, PUBLISHED, FAILED
+  scheduledAt DateTime?
+  publishedAt DateTime?
+  seoScore    Int?          @default(0)
+  hookScore   Int?          @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  targets     PostTarget[]
+}
+
+model PostTarget {
+  id              String    @id @default(cuid())
+  postId          String
+  post            Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  accountId       String
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  platform        String    // YOUTUBE, INSTAGRAM, X
+  status          String    @default("PENDING") // PENDING, PUBLISHING, PUBLISHED, FAILED
+  customContent   String?   // Overridden platform-specific caption
+  firstComment    String?   // Useful for Instagram hashtag burying
+  videoTitle      String?   // YouTube specific
+  videoTags       String?   // YouTube comma-separated tags
+  platformPostId  String?
+  liveUrl         String?
+  errorMessage    String?
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model MetricSnapshot {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  date        DateTime // Snapshot date
+  impressions Int      @default(0)
+  reach       Int      @default(0)
+  engagements Int      @default(0)
+  likes       Int      @default(0)
+  comments    Int      @default(0)
+  shares      Int      @default(0)
+  clicks      Int      @default(0)
+  videoViews  Int      @default(0)
+  followers   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([accountId, date])
+}
+
+model QueueSlot {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform    String?   // null means all platforms
+  dayOfWeek   Int       // 0=Sun, 1=Mon, ..., 6=Sat
+  time        String    // "09:00", "13:30", "18:00"
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+}
+
+model Competitor {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform       String    // YOUTUBE, INSTAGRAM, X
+  username       String
+  displayName    String
+  avatarUrl      String?
+  followersCount Int       @default(0)
+  postsCount     Int       @default(0)
+  engagementRate Float     @default(0.0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([workspaceId, platform, username])
+}
