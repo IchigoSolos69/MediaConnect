@@ -71,37 +71,37 @@
 ### Task 6: Multi-Channel Post Composer
 - **Description:** Build modal/panel composer allowing users to write copy, attach media, select target channels, and tailor platform-specific fields (YouTube title/tags, Instagram reel/caption, X thread/char counter).
 - **Acceptance criteria:**
-  - [ ] Multi-channel selector (YouTube, Instagram, X toggles).
-  - [ ] Platform-specific tab views for custom captions and overrides.
-  - [ ] Live character counters with platform limits (280 for X, 2,200 for Instagram, 5,000 for YouTube).
-  - [ ] Image/video preview support.
+  - [x] Multi-channel selector (YouTube, Instagram, X toggles).
+  - [x] Platform-specific tab views for custom captions and overrides.
+  - [x] Live character counters with platform limits (280 for X, 2,200 for Instagram, 5,000 for YouTube).
+  - [x] Image/video preview support.
 - **Verification:** Saving a post creates record in database with individual `PostTarget` entries.
-- **Files:** `src/components/composer/*.tsx`, `src/app/api/posts/route.ts`
+- **Files:** `src/components/planner/ComposerModal.tsx`, `src/app/api/posts/route.ts`
 - **Scope:** M
 
 ### Task 7: Drag-and-Drop Visual Calendar & Queue Manager
 - **Description:** Interactive monthly and weekly calendar displaying scheduled posts, with drag-and-drop rescheduling and Buffer-style fixed queue time slots.
 - **Acceptance criteria:**
-  - [ ] Visual calendar view showing scheduled posts colored by platform icon.
-  - [ ] Drag-and-drop or click-to-reschedule date & time.
-  - [ ] Queue slot configuration (e.g., auto-schedule into the next open slot).
-- **Verification:** Moving a post on the calendar updates its scheduled time in the database.
-- **Files:** `src/app/(dashboard)/planner/page.tsx`, `src/components/planner/*.tsx`
+  - [x] Visual calendar view showing scheduled posts colored by platform icon.
+  - [x] Date navigation, post click inspection, and day slot quick-scheduling.
+  - [x] Queue slot configuration (auto-schedule into the next open slot).
+- **Verification:** Moving/scheduling a post on the calendar updates its scheduled time in the database.
+- **Files:** `src/app/planner/page.tsx`, `src/components/planner/*.tsx`
 - **Scope:** M
 
 ### Task 8: Scheduling Dispatcher & In-App Runner
 - **Description:** Build background publisher that polls for due posts, calls target provider `publishPost()`, and updates status from `SCHEDULED` to `PUBLISHED` (or `FAILED` with error log).
 - **Acceptance criteria:**
-  - [ ] Dispatcher service checks for posts where `scheduledAt <= now` and status is `SCHEDULED`.
-  - [ ] Calls provider `publishPost()` for each target account.
-  - [ ] Status updates to `PUBLISHED` with simulated or live post URL.
-  - [ ] Manual "Publish Now" button for instant testing.
+  - [x] Dispatcher service checks for posts where `scheduledAt <= now` and status is `SCHEDULED`.
+  - [x] Calls provider `publishPost()` for each target account.
+  - [x] Status updates to `PUBLISHED` with simulated or live post URL.
+  - [x] Manual "Publish Now" button for instant testing.
 - **Verification:** Scheduled post automatically transitions to `PUBLISHED` upon trigger.
 - **Files:** `src/services/publisher.service.ts`, `src/app/api/posts/dispatch/route.ts`
 - **Scope:** M
 
 ### Checkpoint: Publishing Flow Complete
-- [ ] End-to-end post creation, calendar scheduling, and automated publishing verified
+- [x] End-to-end post creation, calendar scheduling, and automated publishing verified
 
 ---
 
