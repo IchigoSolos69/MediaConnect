@@ -20,6 +20,7 @@ export interface PostPublishPayload {
   firstComment?: string | null;
   videoTitle?: string | null;
   videoTags?: string | null;
+  idempotencyKey?: string | null;
 }
 
 export interface PublishResult {

@@ -14,14 +14,14 @@ export interface AuthSessionPayload {
   name: string;
   activeWorkspaceId: string;
   role: WorkspaceRole;
-  tokenVersion?: number; // User token version for global device revocation
+  tokenVersion: number; // Required user token version for global device revocation
   iat?: number;
   exp?: number;
 }
 
 /**
  * Creates a signed JWT session token valid for 7 days.
- * Includes unique jti and tokenVersion for server-side revocation and replay protection.
+ * Includes unique jti and required tokenVersion for server-side revocation and replay protection.
  */
 export async function createSessionToken(
   payload: Omit<AuthSessionPayload, "jti" | "iat" | "exp">
@@ -38,8 +38,8 @@ export async function createSessionToken(
 
 /**
  * Verifies and decodes a signed JWT session token.
- * Validates cryptographic signature and checks server-side revocation in database.
- * Returns null if token is expired, altered, or revoked.
+ * Validates cryptographic signature, enforces tokenVersion presence, and checks server-side revocation.
+ * Fails closed: returns null if token is expired, altered, missing version, or revoked.
  */
 export async function verifySessionToken(
   token: string,
@@ -54,6 +54,14 @@ export async function verifySessionToken(
       return null;
     }
 
+    // Fail closed: tokenVersion is strictly required on all session tokens
+    if (
+      sessionPayload.tokenVersion === undefined ||
+      typeof sessionPayload.tokenVersion !== "number"
+    ) {
+      return null;
+    }
+
     if (checkRevocation) {
       // 1. Check if specific jti was revoked (logout replay defense)
       const isRevoked = await db.revokedSession.findUnique({
@@ -64,14 +72,12 @@ export async function verifySessionToken(
       }
 
       // 2. Check if user's tokenVersion was incremented (global revocation on password reset)
-      if (sessionPayload.tokenVersion !== undefined) {
-        const user = await db.user.findUnique({
-          where: { id: sessionPayload.userId },
-          select: { tokenVersion: true },
-        });
-        if (!user || user.tokenVersion > sessionPayload.tokenVersion) {
-          return null;
-        }
+      const user = await db.user.findUnique({
+        where: { id: sessionPayload.userId },
+        select: { tokenVersion: true },
+      });
+      if (!user || user.tokenVersion !== sessionPayload.tokenVersion) {
+        return null;
       }
     }
 
@@ -83,22 +89,19 @@ export async function verifySessionToken(
 
 /**
  * Revokes an individual session token on the server (called upon logout).
+ * Fails closed: does not silently swallow database errors.
  */
 export async function revokeSessionToken(jti: string, userId: string, exp?: number): Promise<void> {
   const expiresAt = exp ? new Date(exp * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  try {
-    await db.revokedSession.upsert({
-      where: { jti },
-      update: {},
-      create: {
-        jti,
-        userId,
-        expiresAt,
-      },
-    });
-  } catch {
-    // Ignore duplicate or concurrent revocation
-  }
+  await db.revokedSession.upsert({
+    where: { jti },
+    update: {},
+    create: {
+      jti,
+      userId,
+      expiresAt,
+    },
+  });
 }
 
 /**

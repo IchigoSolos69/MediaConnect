@@ -44,6 +44,7 @@ async function runMilestone6aSecurityAudit() {
     name: ownerUser.name,
     activeWorkspaceId: acmeWorkspace.id,
     role: "OWNER",
+    tokenVersion: 1,
   });
   const decoded = await verifySessionToken(sessionToken);
   if (!decoded || decoded.userId !== ownerUser.id || decoded.role !== "OWNER") {

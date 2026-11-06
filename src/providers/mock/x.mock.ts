@@ -12,6 +12,7 @@ import {
 
 export class XMockProvider implements ISocialProvider {
   public platform: SocialPlatform = "X";
+  private idempotencyCache = new Map<string, PublishResult>();
 
   async getAuthUrl(state: string): Promise<string> {
     return `/api/auth/mock-callback?platform=X&state=${state}`;
@@ -38,15 +39,25 @@ export class XMockProvider implements ISocialProvider {
     account: ConnectedAccountData,
     payload: PostPublishPayload
   ): Promise<PublishResult> {
-    const tweetId = "18" + Math.floor(1000000000 + Math.random() * 9000000000).toString();
-    await new Promise((r) => setTimeout(r, 180));
+    if (payload.idempotencyKey && this.idempotencyCache.has(payload.idempotencyKey)) {
+      return this.idempotencyCache.get(payload.idempotencyKey)!;
+    }
 
-    return {
+    const tweetId = "18" + Math.floor(1000000000 + Math.random() * 9000000000).toString();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const result: PublishResult = {
       success: true,
       platformPostId: tweetId,
       liveUrl: `https://x.com/${account.username.replace("@", "")}/status/${tweetId}`,
       publishedAt: new Date(),
     };
+
+    if (payload.idempotencyKey) {
+      this.idempotencyCache.set(payload.idempotencyKey, result);
+    }
+
+    return result;
   }
 
   async fetchInsights(

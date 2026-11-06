@@ -12,6 +12,7 @@ import {
 
 export class YouTubeMockProvider implements ISocialProvider {
   public platform: SocialPlatform = "YOUTUBE";
+  private idempotencyCache = new Map<string, PublishResult>();
 
   async getAuthUrl(state: string): Promise<string> {
     return `/api/auth/mock-callback?platform=YOUTUBE&state=${state}`;
@@ -38,16 +39,26 @@ export class YouTubeMockProvider implements ISocialProvider {
     account: ConnectedAccountData,
     payload: PostPublishPayload
   ): Promise<PublishResult> {
+    if (payload.idempotencyKey && this.idempotencyCache.has(payload.idempotencyKey)) {
+      return this.idempotencyCache.get(payload.idempotencyKey)!;
+    }
+
     const videoId = "mock_yt_" + Math.random().toString(36).substring(2, 9);
     // Simulate slight network dispatch delay
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 100));
 
-    return {
+    const result: PublishResult = {
       success: true,
       platformPostId: videoId,
       liveUrl: `https://youtube.com/watch?v=${videoId}`,
       publishedAt: new Date(),
     };
+
+    if (payload.idempotencyKey) {
+      this.idempotencyCache.set(payload.idempotencyKey, result);
+    }
+
+    return result;
   }
 
   async fetchInsights(

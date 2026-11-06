@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    // 1. Invalidate session token on the server side
+    // 1. Invalidate session token on the server side (fails closed on error)
     const session = await authenticateRequest(request).catch(() => null);
     if (session?.jti) {
       await revokeSessionToken(session.jti, session.userId, session.exp);
@@ -69,7 +69,12 @@ export async function POST(request: NextRequest) {
     const response = NextResponse.json({ success: true, message: "Logged out successfully" });
     response.cookies.delete(SESSION_COOKIE_NAME);
     return response;
-  } catch (err) {
-    return handleAuthApiError(err);
+  } catch (err: unknown) {
+    const error = err as Error;
+    console.error("Logout session revocation failed:", error?.message || error);
+    return NextResponse.json(
+      { success: false, error: "Failed to revoke session securely." },
+      { status: 500 }
+    );
   }
 }

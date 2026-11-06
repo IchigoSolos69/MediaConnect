@@ -7,6 +7,30 @@ const prisma = new PrismaClient();
 async function main() {
   console.log("🌱 Seeding test database fixtures...");
 
+  // Strict Environment Guard: Prevent accidental data wipe in production or live databases
+  const isProduction = process.env.NODE_ENV === "production";
+  const allowDestructiveSeed = process.env.ALLOW_DESTRUCTIVE_SEED === "true";
+  const dbUrl = process.env.DATABASE_URL || "";
+  const isLocalOrTestDb =
+    dbUrl.includes("dev.db") ||
+    dbUrl.includes("test") ||
+    dbUrl.includes("localhost") ||
+    dbUrl.includes("127.0.0.1");
+
+  if (isProduction && !allowDestructiveSeed) {
+    console.error(
+      "❌ FATAL: Destructive test seeding is prohibited in production environment without explicit ALLOW_DESTRUCTIVE_SEED=true."
+    );
+    process.exit(1);
+  }
+
+  if (!isLocalOrTestDb && !allowDestructiveSeed) {
+    console.error(
+      "❌ FATAL: Refusing to run destructive delete operations on non-local database without ALLOW_DESTRUCTIVE_SEED=true."
+    );
+    process.exit(1);
+  }
+
   // Clean existing data for reproducible testing
   await prisma.rateLimitAttempt.deleteMany();
   await prisma.revokedSession.deleteMany();

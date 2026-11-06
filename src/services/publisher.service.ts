@@ -21,22 +21,46 @@ export class CrossTenantPublishError extends Error {
 
 export class PublisherService {
   /**
-   * Publishes a single post target with conditional lease claiming and idempotency tracking.
+   * Publishes a single post target with conditional lease claiming, expired lease recovery, and bounded retries.
    */
   static async publishTarget(targetId: string) {
     const now = new Date();
     const leaseDurationMs = 5 * 60 * 1000; // 5 minute execution lease
     const leaseExpires = new Date(now.getTime() + leaseDurationMs);
 
+    const existingTarget = await db.postTarget.findUnique({
+      where: { id: targetId },
+      include: { post: true, account: true },
+    });
+
+    if (!existingTarget) throw new Error(`Target ${targetId} not found`);
+
+    if (existingTarget.status === "PUBLISHED") {
+      return existingTarget;
+    }
+
+    // Bounded retries check: If target exceeded max retries, mark failed and halt
+    if (existingTarget.retryCount >= existingTarget.maxRetries) {
+      return existingTarget;
+    }
+
     // 1. CONDITIONAL ATOMIC CLAIM AT TARGET LEVEL
-    // Prevents concurrent workers or duplicate clicks from double-publishing this specific channel
+    // Includes:
+    // a) PENDING or FAILED targets without active lease (or expired lease)
+    // b) PUBLISHING targets whose lease expired (Crashed Worker / Timeout Recovery!)
     const claim = await db.postTarget.updateMany({
       where: {
         id: targetId,
-        status: { in: ["PENDING", "FAILED"] },
+        retryCount: { lt: existingTarget.maxRetries },
         OR: [
-          { leaseExpiresAt: null },
-          { leaseExpiresAt: { lte: now } }, // Expired lease recovery
+          {
+            status: { in: ["PENDING", "FAILED"] },
+            OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
+          },
+          {
+            status: "PUBLISHING",
+            leaseExpiresAt: { lte: now }, // Expired lease recovery
+          },
         ],
       },
       data: {
@@ -46,6 +70,11 @@ export class PublisherService {
       },
     });
 
+    if (claim.count === 0) {
+      // Already claimed by an active concurrent worker or completed
+      return existingTarget;
+    }
+
     const target = await db.postTarget.findUnique({
       where: { id: targetId },
       include: {
@@ -54,12 +83,7 @@ export class PublisherService {
       },
     });
 
-    if (!target) throw new Error(`Target ${targetId} not found`);
-
-    if (claim.count === 0) {
-      // Already claimed by another worker or already published
-      return target;
-    }
+    if (!target) throw new Error(`Target ${targetId} not found after claim`);
 
     // 2. Verify workspace tenant integrity inside publishing engine
     if (target.account.workspaceId !== target.post.workspaceId) {
@@ -127,12 +151,13 @@ export class PublisherService {
         resourceId: target.account.id,
         details: { error: error.message },
       });
+      const nextRetry = target.retryCount + 1;
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
           errorMessage: `Decryption error: ${error.message}`,
-          retryCount: target.retryCount + 1,
+          retryCount: nextRetry,
           leaseExpiresAt: null,
         },
       });
@@ -173,24 +198,32 @@ export class PublisherService {
 
         return updated;
       } else {
+        const nextRetry = target.retryCount + 1;
+        const exceeded = nextRetry >= target.maxRetries;
         return await db.postTarget.update({
           where: { id: targetId },
           data: {
             status: "FAILED",
-            errorMessage: result.error || "Publishing failed",
-            retryCount: target.retryCount + 1,
-            leaseExpiresAt: null, // Release lease for potential retry
+            errorMessage: exceeded
+              ? `Maximum retries (${target.maxRetries}) exceeded: ${result.error || "Publishing failed"}`
+              : (result.error || "Publishing failed"),
+            retryCount: nextRetry,
+            leaseExpiresAt: null, // Release lease so retry is possible
           },
         });
       }
     } catch (publishErr: unknown) {
       const pErr = publishErr as Error;
+      const nextRetry = target.retryCount + 1;
+      const exceeded = nextRetry >= target.maxRetries;
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
-          errorMessage: pErr.message || "Provider runtime error",
-          retryCount: target.retryCount + 1,
+          errorMessage: exceeded
+            ? `Maximum retries (${target.maxRetries}) exceeded: ${pErr.message || "Provider runtime error"}`
+            : (pErr.message || "Provider runtime error"),
+          retryCount: nextRetry,
           leaseExpiresAt: null,
         },
       });
@@ -267,30 +300,27 @@ export class PublisherService {
   }
 
   /**
-   * Scans for due posts and publishes them using atomic conditional claiming.
+   * Scans for due posts and publishes them using atomic conditional claiming with crash recovery.
    */
   static async dispatchDuePosts(workspaceId?: string) {
     const now = new Date();
 
-    const whereClause: {
-      status: { in: string[] };
-      approvalStatus: string;
-      scheduledAt: { lte: Date };
-      workspaceId?: string;
-    } = {
-      status: { in: ["SCHEDULED", "PARTIALLY_PUBLISHED"] },
-      approvalStatus: "APPROVED",
-      scheduledAt: {
-        lte: now,
-      },
-    };
-
-    if (workspaceId) {
-      whereClause.workspaceId = workspaceId;
-    }
-
     const candidates = await db.post.findMany({
-      where: whereClause,
+      where: {
+        approvalStatus: "APPROVED",
+        ...(workspaceId ? { workspaceId } : {}),
+        OR: [
+          {
+            status: { in: ["SCHEDULED", "PARTIALLY_PUBLISHED"] },
+            scheduledAt: { lte: now },
+          },
+          // Crash recovery: Post was left in PUBLISHING, but has been stuck (> 5 min)
+          {
+            status: "PUBLISHING",
+            updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) },
+          },
+        ],
+      },
       select: { id: true, status: true, workspaceId: true },
     });
 

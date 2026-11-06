@@ -288,6 +288,7 @@ async function runMilestone6A1TestSuite() {
     name: editorUser.name,
     activeWorkspaceId: acmeWorkspace.id,
     role: "EDITOR",
+    tokenVersion: 1,
   });
 
   // Editor attempts to immediately publish a post (forbidden)

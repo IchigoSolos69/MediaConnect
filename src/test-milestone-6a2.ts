@@ -9,6 +9,7 @@ import {
 } from "./lib/auth/session";
 import { sanitizeAccount } from "./lib/auth/server";
 import { PublisherService, UnapprovedPostError } from "./services/publisher.service";
+import { getSafeClientIp } from "./lib/security/rate-limiter";
 import { NextRequest } from "next/server";
 import { POST as loginRoute } from "./app/api/auth/login/route";
 import { GET as sessionGetRoute, POST as sessionLogoutRoute } from "./app/api/auth/session/route";
@@ -22,7 +23,7 @@ async function runMilestone6A2TestSuite() {
   console.log("==================================================================\n");
 
   let passedTests = 0;
-  const totalTests = 14;
+  const totalTests = 16;
 
   // ----------------------------------------------------------------------
   // TEST 1: Strict Production Secrets Validation (No Silent Weak Key Hashing)
@@ -223,6 +224,16 @@ async function runMilestone6A2TestSuite() {
   console.log("\nTEST 6: Durable Authentication Rate Limiting (Brute-Force Defense)");
   const testIp = "192.168.200.75";
   const bruteEmail = "brute_force_test@mediaconnect.app";
+
+  // Clean any previous test rate limit records
+  await db.rateLimitAttempt.deleteMany({
+    where: {
+      OR: [
+        { key: { contains: testIp } },
+        { key: { contains: bruteEmail } },
+      ],
+    },
+  });
 
   for (let i = 1; i <= 5; i++) {
     const badReq = new NextRequest("http://localhost:3000/api/auth/login", {
@@ -551,6 +562,84 @@ async function runMilestone6A2TestSuite() {
   }
   console.log(`   ✓ All ${accountsInDb.length} database account tokens verified encrypted`);
   console.log(`   ✓ sanitizeAccount verified: accessToken and refreshToken are stripped from API output`);
+  passedTests++;
+
+  // ----------------------------------------------------------------------
+  // TEST 15: Expired Lease Recovery on Target Stuck in PUBLISHING
+  // ----------------------------------------------------------------------
+  console.log("\nTEST 15: Expired Lease Recovery on Target Stuck in PUBLISHING");
+  const stuckPost = await db.post.create({
+    data: {
+      workspaceId: acmeWorkspace.id,
+      authorId: editorUser.id,
+      content: "Post simulating worker crash during publish",
+      status: "PUBLISHING",
+      approvalStatus: "APPROVED",
+      targets: {
+        create: [
+          {
+            accountId: acmeAccount.id,
+            platform: acmeAccount.platform,
+            status: "PUBLISHING", // Worker crashed mid-flight!
+            leaseExpiresAt: new Date(Date.now() - 60000), // Lease expired 1 min ago
+            retryCount: 0,
+            maxRetries: 3,
+          },
+        ],
+      },
+    },
+    include: { targets: true },
+  });
+
+  const stuckTargetId = stuckPost.targets[0].id;
+  // A new worker attempts to publish this target
+  const recoveredTarget = await PublisherService.publishTarget(stuckTargetId);
+
+  if (recoveredTarget.status !== "PUBLISHED") {
+    throw new Error(`Crashed worker target recovery failed! Status: ${recoveredTarget.status}`);
+  }
+
+  console.log("   ✓ Target stuck in PUBLISHING with expired lease was successfully reclaimed and published");
+  await db.postTarget.deleteMany({ where: { postId: stuckPost.id } });
+  await db.post.delete({ where: { id: stuckPost.id } });
+  passedTests++;
+
+  // ----------------------------------------------------------------------
+  // TEST 16: Mandatory Session TokenVersion & Safe IP Proxy Resolution
+  // ----------------------------------------------------------------------
+  console.log("\nTEST 16: Mandatory Session TokenVersion & Safe IP Proxy Resolution");
+  // 16a. Token without tokenVersion must be rejected
+  const tokenWithoutVersion = await createSessionToken({
+    userId: testUser.id,
+    email: testUser.email,
+    name: testUser.name,
+    activeWorkspaceId: testUser.workspaceId || "acme",
+    role: "OWNER",
+    tokenVersion: undefined as unknown as number, // Omit tokenVersion
+  });
+
+  const rejectedVersionless = await verifySessionToken(tokenWithoutVersion, true);
+  if (rejectedVersionless !== null) {
+    throw new Error("Security failure: Session token missing tokenVersion was accepted!");
+  }
+  console.log("   ✓ Session tokens missing tokenVersion are strictly rejected");
+
+  // 16b. Safe client IP resolution with spoofing prevention
+  const spoofHeader = new Headers();
+  spoofHeader.set("x-forwarded-for", "10.0.0.1, 203.0.113.195, 198.51.100.10");
+  const extractedIp = getSafeClientIp({ headers: spoofHeader });
+  if (extractedIp !== "198.51.100.10") {
+    throw new Error(`Expected rightmost trusted IP 198.51.100.10, got ${extractedIp}`);
+  }
+
+  const cfHeader = new Headers();
+  cfHeader.set("cf-connecting-ip", "198.51.100.42");
+  cfHeader.set("x-forwarded-for", "1.2.3.4");
+  const cfIp = getSafeClientIp({ headers: cfHeader });
+  if (cfIp !== "198.51.100.42") {
+    throw new Error(`Expected Cloudflare direct connecting IP 198.51.100.42, got ${cfIp}`);
+  }
+  console.log("   ✓ getSafeClientIp protects against proxy header spoofing and honors Cloudflare verified IPs");
   passedTests++;
 
   console.log("\n==================================================================");

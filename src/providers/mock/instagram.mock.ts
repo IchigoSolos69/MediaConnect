@@ -12,6 +12,7 @@ import {
 
 export class InstagramMockProvider implements ISocialProvider {
   public platform: SocialPlatform = "INSTAGRAM";
+  private idempotencyCache = new Map<string, PublishResult>();
 
   async getAuthUrl(state: string): Promise<string> {
     return `/api/auth/mock-callback?platform=INSTAGRAM&state=${state}`;
@@ -38,15 +39,25 @@ export class InstagramMockProvider implements ISocialProvider {
     account: ConnectedAccountData,
     payload: PostPublishPayload
   ): Promise<PublishResult> {
-    const postCode = "mock_ig_" + Math.random().toString(36).substring(2, 9);
-    await new Promise((r) => setTimeout(r, 200));
+    if (payload.idempotencyKey && this.idempotencyCache.has(payload.idempotencyKey)) {
+      return this.idempotencyCache.get(payload.idempotencyKey)!;
+    }
 
-    return {
+    const postCode = "mock_ig_" + Math.random().toString(36).substring(2, 9);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const result: PublishResult = {
       success: true,
       platformPostId: postCode,
       liveUrl: `https://instagram.com/p/${postCode}`,
       publishedAt: new Date(),
     };
+
+    if (payload.idempotencyKey) {
+      this.idempotencyCache.set(payload.idempotencyKey, result);
+    }
+
+    return result;
   }
 
   async fetchInsights(

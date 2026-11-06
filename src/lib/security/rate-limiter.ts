@@ -13,19 +13,30 @@ function isValidIp(ip: string): boolean {
 }
 
 /**
- * Safely extracts client IP from request headers, preventing spoofing.
+ * Safely extracts client IP from request headers establishing a trusted proxy boundary.
+ * Evaluates provider-verified headers first, then rightmost untrusted hop in X-Forwarded-For.
  */
 export function getSafeClientIp(request: { headers: Headers }): string {
+  // 1. Cloudflare direct verified connecting IP
+  const cfConnectingIp = request.headers.get("cf-connecting-ip")?.trim();
+  if (cfConnectingIp && isValidIp(cfConnectingIp)) {
+    return cfConnectingIp;
+  }
+
+  // 2. Parse X-Forwarded-For: select rightmost validated IP to defeat client spoofing
   const xForwardedFor = request.headers.get("x-forwarded-for");
   if (xForwardedFor) {
-    const ips = xForwardedFor.split(",").map((p) => p.trim());
-    for (const ip of ips) {
-      if (isValidIp(ip) && ip !== "unknown") {
-        return ip;
-      }
+    const ips = xForwardedFor
+      .split(",")
+      .map((p) => p.trim())
+      .filter((ip) => isValidIp(ip) && ip !== "unknown");
+    if (ips.length > 0) {
+      // Rightmost IP is appended by the nearest trusted gateway/reverse proxy
+      return ips[ips.length - 1];
     }
   }
 
+  // 3. Fallback to X-Real-IP
   const realIp = request.headers.get("x-real-ip")?.trim();
   if (realIp && isValidIp(realIp)) {
     return realIp;
@@ -36,7 +47,7 @@ export function getSafeClientIp(request: { headers: Headers }): string {
 
 /**
  * Durable rate limiter backed by database storage.
- * Works across serverless instances, clustered workers, and app restarts.
+ * Enforces atomic increments and fail-closed defense during backend outages.
  */
 export class DurableRateLimiter {
   private readonly maxAttempts: number;
@@ -49,8 +60,11 @@ export class DurableRateLimiter {
 
   /**
    * Checks whether the given key is currently rate limited.
+   * In production, fails closed (allowed: false) if database check fails.
    */
-  public async check(key: string): Promise<{ allowed: boolean; remaining: number; retryAfterSeconds: number }> {
+  public async check(
+    key: string
+  ): Promise<{ allowed: boolean; remaining: number; retryAfterSeconds: number }> {
     const now = new Date();
 
     try {
@@ -70,32 +84,43 @@ export class DurableRateLimiter {
         remaining,
         retryAfterSeconds,
       };
-    } catch {
-      // In case of unexpected DB error, allow request to avoid complete outage
+    } catch (err: unknown) {
+      console.error("[SECURITY ALERT] Rate limiter database check error:", (err as Error)?.message || err);
+      // Fail closed in production to prevent brute-force attacks during database degradation
+      if (process.env.NODE_ENV === "production") {
+        return { allowed: false, remaining: 0, retryAfterSeconds: 60 };
+      }
       return { allowed: true, remaining: this.maxAttempts, retryAfterSeconds: 0 };
     }
   }
 
   /**
-   * Records a failed attempt for the key in durable database storage.
+   * Records a failed attempt for the key in durable database storage with atomic increment.
    */
-  public async recordFailure(key: string): Promise<{ remaining: number; retryAfterSeconds: number }> {
+  public async recordFailure(
+    key: string
+  ): Promise<{ remaining: number; retryAfterSeconds: number }> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.windowMs);
 
     try {
-      const record = await db.rateLimitAttempt.findUnique({ where: { key } });
+      const existing = await db.rateLimitAttempt.findUnique({ where: { key } });
 
-      let attempts = 1;
-      if (record && record.expiresAt > now) {
-        attempts = record.attempts + 1;
-        await db.rateLimitAttempt.update({
+      if (existing && existing.expiresAt > now) {
+        // Atomic database increment
+        const updated = await db.rateLimitAttempt.update({
           where: { key },
           data: {
-            attempts,
+            attempts: { increment: 1 },
             lastAttemptAt: now,
           },
         });
+        const remaining = Math.max(0, this.maxAttempts - updated.attempts);
+        const retryAfterSeconds = Math.max(
+          1,
+          Math.ceil((updated.expiresAt.getTime() - now.getTime()) / 1000)
+        );
+        return { remaining, retryAfterSeconds };
       } else {
         await db.rateLimitAttempt.upsert({
           where: { key },
@@ -113,14 +138,14 @@ export class DurableRateLimiter {
             expiresAt,
           },
         });
+        return {
+          remaining: this.maxAttempts - 1,
+          retryAfterSeconds: Math.ceil(this.windowMs / 1000),
+        };
       }
-
-      const remaining = Math.max(0, this.maxAttempts - attempts);
-      const retryAfterSeconds = Math.max(1, Math.ceil((expiresAt.getTime() - now.getTime()) / 1000));
-
-      return { remaining, retryAfterSeconds };
-    } catch {
-      return { remaining: 0, retryAfterSeconds: Math.ceil(this.windowMs / 1000) };
+    } catch (err: unknown) {
+      console.error("[SECURITY ALERT] Rate limiter recordFailure error:", (err as Error)?.message || err);
+      return { remaining: 0, retryAfterSeconds: 60 };
     }
   }
 
