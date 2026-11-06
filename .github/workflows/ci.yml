@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DATABASE_URL: "file:./prisma/dev.db"
+      DATABASE_URL: "file:./dev.db"
       NEXT_PUBLIC_SOCIAL_MODE: "mock"
       AUTH_SECRET: "ci_testing_auth_secret_minimum_32_characters_long_super_secure"
       TOKEN_VAULT_KEY_V1: "e9b21f98c614b7e1898522e8412e8732a13876d91244e8910248bfb18274619a"
@@ -24,7 +24,7 @@ jobs:
       TOKEN_VAULT_ACTIVE_VERSION: "v1"
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Node.js 20
@@ -36,20 +36,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: ESLint Check
+        run: npm run lint
+
       - name: Generate Prisma Client
         run: npx prisma generate
 
-      - name: Push Database Schema
-        run: npx prisma db push
+      - name: Initialize Isolated Test Database
+        run: npx prisma db push --force-reset
 
-      - name: Run Token Migration & Vault Verification
+      - name: Seed Reproducible Test Fixtures
+        run: npx prisma db seed
+
+      - name: Run Read-Only Token Vault Audit
         run: npx tsx src/scripts/migrate-tokens.ts --verify
 
       - name: Run Token Vault Cryptographic Tests
         run: npx tsx src/test-token-vault.ts
 
-      - name: Run Security & Multi-Tenancy Integration Test Suite
-        run: npx tsx src/test-milestone-6a1.ts
+      - name: Run Security & Production Hardening Test Suite (6A.2)
+        run: npx tsx src/test-milestone-6a2.ts
 
       - name: TypeScript Type Check
         run: npx tsc --noEmit

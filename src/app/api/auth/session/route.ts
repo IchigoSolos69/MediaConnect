@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, handleAuthApiError } from "@/lib/auth/server";
 import { db } from "@/lib/db";
-import { SESSION_COOKIE_NAME } from "@/lib/auth/session";
+import { SESSION_COOKIE_NAME, revokeSessionToken } from "@/lib/auth/session";
+import { SecurityAudit } from "@/lib/security/audit";
 
 export async function GET(request: NextRequest) {
   try {
@@ -51,8 +52,24 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST() {
-  const response = NextResponse.json({ success: true, message: "Logged out" });
-  response.cookies.delete(SESSION_COOKIE_NAME);
-  return response;
+export async function POST(request: NextRequest) {
+  try {
+    // 1. Invalidate session token on the server side
+    const session = await authenticateRequest(request).catch(() => null);
+    if (session?.jti) {
+      await revokeSessionToken(session.jti, session.userId, session.exp);
+      SecurityAudit.log({
+        event: "SESSION_REVOKED",
+        userId: session.userId,
+        details: { jti: session.jti },
+      });
+    }
+
+    // 2. Clear client cookie
+    const response = NextResponse.json({ success: true, message: "Logged out successfully" });
+    response.cookies.delete(SESSION_COOKIE_NAME);
+    return response;
+  } catch (err) {
+    return handleAuthApiError(err);
+  }
 }

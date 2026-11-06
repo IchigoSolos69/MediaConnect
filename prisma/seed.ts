@@ -1,22 +1,27 @@
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
+import { TokenVault } from "../src/lib/crypto/vault";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🌱 Seeding database...");
+  console.log("🌱 Seeding test database fixtures...");
 
-  // Clean existing data
+  // Clean existing data for reproducible testing
+  await prisma.rateLimitAttempt.deleteMany();
+  await prisma.revokedSession.deleteMany();
   await prisma.metricSnapshot.deleteMany();
   await prisma.postTarget.deleteMany();
   await prisma.post.deleteMany();
   await prisma.queueSlot.deleteMany();
   await prisma.competitor.deleteMany();
   await prisma.account.deleteMany();
+  await prisma.workspaceMember.deleteMany();
   await prisma.user.deleteMany();
   await prisma.workspace.deleteMany();
 
-  // 1. Create Workspace
-  const workspace = await prisma.workspace.create({
+  // 1. Create Primary Workspace (Acme Media)
+  const acmeWorkspace = await prisma.workspace.create({
     data: {
       name: "Acme Media",
       slug: "acme-media",
@@ -24,21 +29,18 @@ async function main() {
     },
   });
 
-  // 2. Create User
-  await prisma.user.create({
+  // 2. Create Secondary Workspace (Beta Agency - Tenant Isolation)
+  const betaWorkspace = await prisma.workspace.create({
     data: {
-      email: "admin@mediaconnect.app",
-      name: "Adi",
-      role: "OWNER",
-      workspaceId: workspace.id,
-      avatarUrl: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+      name: "Beta Agency",
+      slug: "beta-agency",
     },
   });
 
-  // 3. Create Connected Social Accounts (YouTube, Instagram, X)
+  // 3. Seed Acme Media Social Accounts (with AES-256-GCM Vault encrypted tokens)
   const ytAccount = await prisma.account.create({
     data: {
-      workspaceId: workspace.id,
+      workspaceId: acmeWorkspace.id,
       platform: "YOUTUBE",
       platformAccountId: "yt_acme_studios_99",
       username: "@AcmeStudios",
@@ -49,12 +51,20 @@ async function main() {
       postsCount: 128,
       status: "ACTIVE",
       isMock: true,
+      tokenKeyVersion: "v1",
+    },
+  });
+  // Encrypt with account.id as AAD
+  await prisma.account.update({
+    where: { id: ytAccount.id },
+    data: {
+      accessToken: TokenVault.encrypt("mock_youtube_oauth_token_secret_12345", ytAccount.id, "v1"),
     },
   });
 
   const igAccount = await prisma.account.create({
     data: {
-      workspaceId: workspace.id,
+      workspaceId: acmeWorkspace.id,
       platform: "INSTAGRAM",
       platformAccountId: "ig_acmemedia_01",
       username: "@acmemedia",
@@ -65,12 +75,19 @@ async function main() {
       postsCount: 432,
       status: "ACTIVE",
       isMock: true,
+      tokenKeyVersion: "v1",
+    },
+  });
+  await prisma.account.update({
+    where: { id: igAccount.id },
+    data: {
+      accessToken: TokenVault.encrypt("mock_instagram_oauth_token_secret_67890", igAccount.id, "v1"),
     },
   });
 
   const xAccount = await prisma.account.create({
     data: {
-      workspaceId: workspace.id,
+      workspaceId: acmeWorkspace.id,
       platform: "X",
       platformAccountId: "x_acmemediahq_77",
       username: "@AcmeMediaHQ",
@@ -81,15 +98,95 @@ async function main() {
       postsCount: 1940,
       status: "ACTIVE",
       isMock: true,
+      tokenKeyVersion: "v1",
+    },
+  });
+  await prisma.account.update({
+    where: { id: xAccount.id },
+    data: {
+      accessToken: TokenVault.encrypt("mock_x_oauth_token_secret_abcdef", xAccount.id, "v1"),
     },
   });
 
-  // 4. Create Queue Slots (e.g. Mon-Fri at 09:00, 13:00, 18:00)
+  // Seed Beta Agency Social Account
+  const betaAccount = await prisma.account.create({
+    data: {
+      workspaceId: betaWorkspace.id,
+      platform: "X",
+      platformAccountId: "beta_x_001",
+      username: "@BetaAgencyHQ",
+      displayName: "Beta Agency HQ",
+      followersCount: 5200,
+      status: "ACTIVE",
+      isMock: true,
+      tokenKeyVersion: "v1",
+    },
+  });
+  await prisma.account.update({
+    where: { id: betaAccount.id },
+    data: {
+      accessToken: TokenVault.encrypt("mock_beta_secret_token", betaAccount.id, "v1"),
+    },
+  });
+
+  // 4. Seed Role Users (Alice Owner, Bob Approver, Charlie Editor, Dana Beta)
+  const defaultPassword = "Password123!";
+  const passwordHash = await bcrypt.hash(defaultPassword, 12);
+
+  const testUsers = [
+    {
+      email: "owner@mediaconnect.app",
+      name: "Alice Owner",
+      role: "OWNER" as const,
+      workspaceId: acmeWorkspace.id,
+    },
+    {
+      email: "approver@mediaconnect.app",
+      name: "Bob Approver",
+      role: "APPROVER" as const,
+      workspaceId: acmeWorkspace.id,
+    },
+    {
+      email: "editor@mediaconnect.app",
+      name: "Charlie Editor",
+      role: "EDITOR" as const,
+      workspaceId: acmeWorkspace.id,
+    },
+    {
+      email: "beta_user@mediaconnect.app",
+      name: "Dana Beta",
+      role: "OWNER" as const,
+      workspaceId: betaWorkspace.id,
+    },
+  ];
+
+  for (const u of testUsers) {
+    const user = await prisma.user.create({
+      data: {
+        email: u.email,
+        name: u.name,
+        passwordHash,
+        workspaceId: u.workspaceId,
+        role: u.role,
+        tokenVersion: 1,
+      },
+    });
+
+    await prisma.workspaceMember.create({
+      data: {
+        workspaceId: u.workspaceId,
+        userId: user.id,
+        role: u.role,
+      },
+    });
+  }
+
+  // 5. Create Queue Slots for Acme Media
   for (let day = 1; day <= 5; day++) {
     for (const time of ["09:00", "13:00", "18:00"]) {
       await prisma.queueSlot.create({
         data: {
-          workspaceId: workspace.id,
+          workspaceId: acmeWorkspace.id,
           dayOfWeek: day,
           time,
         },
@@ -97,177 +194,36 @@ async function main() {
     }
   }
 
-  // 5. Seed Historical Metrics (Past 14 days)
-  const now = new Date();
-  const accounts = [ytAccount, igAccount, xAccount];
-
-  for (let i = 14; i >= 0; i--) {
-    const date = new Date(now);
-    date.setDate(date.getDate() - i);
-    date.setHours(0, 0, 0, 0);
-
-    for (const account of accounts) {
-      const baseImpressions = account.platform === "INSTAGRAM" ? 8500 : account.platform === "X" ? 14200 : 6200;
-      const variation = Math.floor(Math.random() * 2000) - 1000;
-      const impressions = Math.max(1000, baseImpressions + variation);
-      const reach = Math.floor(impressions * 0.78);
-      const likes = Math.floor(impressions * 0.045);
-      const comments = Math.floor(likes * 0.12);
-      const shares = Math.floor(likes * 0.08);
-      const clicks = Math.floor(impressions * 0.02);
-      const engagements = likes + comments + shares + clicks;
-
-      await prisma.metricSnapshot.create({
-        data: {
-          accountId: account.id,
-          date,
-          impressions,
-          reach,
-          engagements,
-          likes,
-          comments,
-          shares,
-          clicks,
-          videoViews: account.platform === "YOUTUBE" ? Math.floor(impressions * 0.6) : 0,
-          followers: account.followersCount - i * 45,
-        },
-      });
-    }
-  }
-
-  // 6. Create Competitors (Metricool benchmarking)
+  // 6. Create Competitor Benchmarks
   await prisma.competitor.createMany({
     data: [
       {
-        workspaceId: workspace.id,
-        platform: "X",
-        username: "TechCrunch",
-        displayName: "TechCrunch",
-        avatarUrl: "https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=150&auto=format&fit=crop&q=80",
-        followersCount: 10400000,
-        postsCount: 154000,
-        engagementRate: 1.8,
-      },
-      {
-        workspaceId: workspace.id,
+        workspaceId: acmeWorkspace.id,
         platform: "INSTAGRAM",
-        username: "wired",
-        displayName: "WIRED",
-        avatarUrl: "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=150&auto=format&fit=crop&q=80",
-        followersCount: 1900000,
-        postsCount: 6200,
-        engagementRate: 2.4,
+        username: "@hootsuite",
+        displayName: "Hootsuite",
+        followersCount: 940000,
+        postsCount: 3820,
+        engagementRate: 1.84,
       },
       {
-        workspaceId: workspace.id,
-        platform: "YOUTUBE",
-        username: "Verge",
-        displayName: "The Verge",
-        avatarUrl: "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=150&auto=format&fit=crop&q=80",
-        followersCount: 3450000,
-        postsCount: 3800,
-        engagementRate: 4.1,
+        workspaceId: acmeWorkspace.id,
+        platform: "INSTAGRAM",
+        username: "@sproutsocial",
+        displayName: "Sprout Social",
+        followersCount: 320000,
+        postsCount: 2150,
+        engagementRate: 2.12,
       },
     ],
   });
 
-  // 7. Create Sample Posts (Published & Upcoming Scheduled)
-  // Past Published Post
-  const pastDate = new Date(now);
-  pastDate.setDate(pastDate.getDate() - 1);
-  pastDate.setHours(14, 30, 0, 0);
-
-  const pastPost = await prisma.post.create({
-    data: {
-      workspaceId: workspace.id,
-      title: "🚀 Big Announcement: MediaConnect is Here!",
-      content: "Stop wasting hours switching between 5 different social tools. MediaConnect unifies your visual calendar, deep Metricool analytics, and real-time caption SEO into one high-performance dashboard.\n\nWhich feature are you most excited to try? Let us know below! 👇 #SocialMediaMarketing #ContentStrategy #CreatorEconomy",
-      status: "PUBLISHED",
-      scheduledAt: pastDate,
-      publishedAt: pastDate,
-      seoScore: 92,
-      hookScore: 94,
-    },
-  });
-
-  await prisma.postTarget.createMany({
-    data: [
-      {
-        postId: pastPost.id,
-        accountId: xAccount.id,
-        platform: "X",
-        status: "PUBLISHED",
-        liveUrl: "https://x.com/AcmeMediaHQ/status/mock_1849204192",
-        platformPostId: "mock_x_1849204192",
-        publishedAt: pastDate,
-      },
-      {
-        postId: pastPost.id,
-        accountId: igAccount.id,
-        platform: "INSTAGRAM",
-        status: "PUBLISHED",
-        firstComment: "#MarketingAutomation #SocialMediaGrowth #CreatorTools",
-        liveUrl: "https://instagram.com/p/mock_d892kL1",
-        platformPostId: "mock_ig_d892kL1",
-        publishedAt: pastDate,
-      },
-      {
-        postId: pastPost.id,
-        accountId: ytAccount.id,
-        platform: "YOUTUBE",
-        status: "PUBLISHED",
-        videoTitle: "The Ultimate Social Media Automation Platform [Walkthrough]",
-        videoTags: "social media, buffer, metricool, marketing automation",
-        liveUrl: "https://youtube.com/watch?v=mock_vid_942",
-        platformPostId: "mock_yt_vid_942",
-        publishedAt: pastDate,
-      },
-    ],
-  });
-
-  // Upcoming Scheduled Post
-  const futureDate = new Date(now);
-  futureDate.setDate(futureDate.getDate() + 1);
-  futureDate.setHours(10, 0, 0, 0);
-
-  const futurePost = await prisma.post.create({
-    data: {
-      workspaceId: workspace.id,
-      title: "3 Subtle SEO Mistakes Killing Your Social Reach",
-      content: "Are your posts invisible in TikTok & Instagram search? Most creators overlook these 3 simple keyword placement rules:\n\n1. First 3 seconds spoken text\n2. CamelCase hashtag grouping\n3. Keyword-dense image alt-text\n\nFull guide drops tomorrow! Bookmark this post. 🔖 #SocialSEO #ContentCreator #GrowthHacking",
-      status: "SCHEDULED",
-      scheduledAt: futureDate,
-      seoScore: 88,
-      hookScore: 90,
-    },
-  });
-
-  await prisma.postTarget.createMany({
-    data: [
-      {
-        postId: futurePost.id,
-        accountId: xAccount.id,
-        platform: "X",
-        status: "PENDING",
-      },
-      {
-        postId: futurePost.id,
-        accountId: igAccount.id,
-        platform: "INSTAGRAM",
-        status: "PENDING",
-        firstComment: "#SocialMediaStrategy #AlgorithmHacks #SEOForCreators",
-      },
-    ],
-  });
-
-  console.log("✅ Seed completed successfully!");
+  console.log("✓ Fixtures seeded successfully: Acme Media (3 accounts), Beta Agency (1 account), 4 users with RBAC.");
 }
 
 main()
   .catch((e) => {
-    console.error("❌ Seed failed:", e);
+    console.error("Seeding failed:", e);
     process.exit(1);
   })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .finally(() => prisma.$disconnect());

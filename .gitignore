@@ -10,6 +10,16 @@
 !.yarn/releases
 !.yarn/versions
 
+# database & local storage
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+dev.db
+prisma/dev.db
+
 # testing
 /coverage
 

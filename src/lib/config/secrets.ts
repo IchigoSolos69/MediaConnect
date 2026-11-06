@@ -1,5 +1,3 @@
-import crypto from "crypto";
-
 export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -28,13 +26,13 @@ export function getAuthSecret(): Uint8Array {
   if (isProduction()) {
     if (!secret || secret.trim().length < 32 || secret === DEV_ONLY_AUTH_SECRET) {
       throw new ConfigError(
-        "FATAL: Production security requirement violated: AUTH_SECRET must be set in production and be at least 32 characters long."
+        "FATAL: Production security requirement violated: AUTH_SECRET must be configured with at least 32 characters in production."
       );
     }
     return new TextEncoder().encode(secret);
   }
 
-  // Development / Test mode fallback with log warning
+  // Development / Test mode fallback
   if (!secret) {
     return new TextEncoder().encode(DEV_ONLY_AUTH_SECRET);
   }
@@ -45,7 +43,8 @@ export function getAuthSecret(): Uint8Array {
 /**
  * Returns the 32-byte cryptographic key for AES-256-GCM token encryption.
  * Strictly separates session secrets from token encryption keys.
- * Throws in production if missing or using development fallback.
+ * In production, strictly requires a properly generated 64-character hexadecimal key (256-bit).
+ * Refuses to silently hash arbitrary weak strings in production.
  */
 export function getTokenVaultKey(version: string = "v1"): Buffer {
   const envKey =
@@ -61,6 +60,15 @@ export function getTokenVaultKey(version: string = "v1"): Buffer {
         `FATAL: Production security requirement violated: TOKEN_VAULT_KEY_${version.toUpperCase()} must be securely configured in production environment.`
       );
     }
+
+    // In production, strictly require 64-char hex key (32 bytes). No weak string hashing.
+    if (envKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(envKey)) {
+      throw new ConfigError(
+        `FATAL: Production security requirement violated: TOKEN_VAULT_KEY_${version.toUpperCase()} must be an exact 64-character hexadecimal string (256-bit AES key).`
+      );
+    }
+
+    return Buffer.from(envKey, "hex");
   }
 
   const effectiveKey = envKey || (version === "v2" ? DEV_ONLY_VAULT_KEY_V2 : DEV_ONLY_VAULT_KEY_V1);
@@ -74,8 +82,8 @@ export function getTokenVaultKey(version: string = "v1"): Buffer {
     return Buffer.from(effectiveKey, "hex");
   }
 
-  // Fallback: SHA-256 hash to guarantee exact 32 bytes
-  return crypto.createHash("sha256").update(effectiveKey).digest();
+  // Development fallback for non-production only
+  return Buffer.from(effectiveKey.padEnd(32, "0").slice(0, 32), "utf8");
 }
 
 /**

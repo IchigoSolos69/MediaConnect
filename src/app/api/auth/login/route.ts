@@ -4,11 +4,11 @@ import bcrypt from "bcryptjs";
 import { createSessionToken, SESSION_COOKIE_NAME } from "@/lib/auth/session";
 import { WorkspaceRole } from "@/lib/auth/permissions";
 import { LoginSchema } from "@/lib/validation/schemas";
-import { loginRateLimiter } from "@/lib/security/rate-limiter";
+import { loginRateLimiter, getSafeClientIp } from "@/lib/security/rate-limiter";
 import { SecurityAudit } from "@/lib/security/audit";
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1";
+  const ip = getSafeClientIp(request);
 
   try {
     const rawBody = await request.json();
@@ -24,8 +24,8 @@ export async function POST(request: NextRequest) {
     const { email, password, workspaceId: requestedWorkspaceId } = parseResult.data;
     const rateLimitKey = `${ip}:${email.toLowerCase()}`;
 
-    // 1. Check rate limit
-    const limitCheck = loginRateLimiter.check(rateLimitKey);
+    // 1. Check durable rate limit across instances
+    const limitCheck = await loginRateLimiter.check(rateLimitKey);
     if (!limitCheck.allowed) {
       SecurityAudit.log({
         event: "AUTH_RATE_LIMITED",
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (!user || !user.passwordHash) {
-      loginRateLimiter.recordFailure(rateLimitKey);
+      await loginRateLimiter.recordFailure(rateLimitKey);
       SecurityAudit.log({
         event: "AUTH_FAILURE",
         email,
@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
 
     const passwordValid = await bcrypt.compare(password, user.passwordHash);
     if (!passwordValid) {
-      loginRateLimiter.recordFailure(rateLimitKey);
+      await loginRateLimiter.recordFailure(rateLimitKey);
       SecurityAudit.log({
         event: "AUTH_FAILURE",
         email,
@@ -99,8 +99,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Reset rate limit on success
-    loginRateLimiter.reset(rateLimitKey);
+    // Reset durable rate limit on successful authentication
+    await loginRateLimiter.reset(rateLimitKey);
 
     // 3. Determine active workspace
     let activeMembership = user.memberships[0];
@@ -115,6 +115,7 @@ export async function POST(request: NextRequest) {
       name: user.name,
       activeWorkspaceId: activeMembership.workspaceId,
       role: activeMembership.role as WorkspaceRole,
+      tokenVersion: user.tokenVersion,
     };
 
     const token = await createSessionToken(sessionPayload);
@@ -160,8 +161,9 @@ export async function POST(request: NextRequest) {
     });
 
     return response;
-  } catch (error: any) {
-    console.error("Login API error:", error?.message || error);
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error("Login API error:", err?.message || err);
     return NextResponse.json(
       { success: false, error: "Authentication failed. Please try again." },
       { status: 500 }

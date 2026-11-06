@@ -21,9 +21,31 @@ export class CrossTenantPublishError extends Error {
 
 export class PublisherService {
   /**
-   * Publishes a single post target to its designated social platform.
+   * Publishes a single post target with conditional lease claiming and idempotency tracking.
    */
   static async publishTarget(targetId: string) {
+    const now = new Date();
+    const leaseDurationMs = 5 * 60 * 1000; // 5 minute execution lease
+    const leaseExpires = new Date(now.getTime() + leaseDurationMs);
+
+    // 1. CONDITIONAL ATOMIC CLAIM AT TARGET LEVEL
+    // Prevents concurrent workers or duplicate clicks from double-publishing this specific channel
+    const claim = await db.postTarget.updateMany({
+      where: {
+        id: targetId,
+        status: { in: ["PENDING", "FAILED"] },
+        OR: [
+          { leaseExpiresAt: null },
+          { leaseExpiresAt: { lte: now } }, // Expired lease recovery
+        ],
+      },
+      data: {
+        status: "PUBLISHING",
+        claimedAt: now,
+        leaseExpiresAt: leaseExpires,
+      },
+    });
+
     const target = await db.postTarget.findUnique({
       where: { id: targetId },
       include: {
@@ -33,9 +55,13 @@ export class PublisherService {
     });
 
     if (!target) throw new Error(`Target ${targetId} not found`);
-    if (target.status === "PUBLISHED") return target;
 
-    // 1. Verify workspace tenant integrity inside publishing engine
+    if (claim.count === 0) {
+      // Already claimed by another worker or already published
+      return target;
+    }
+
+    // 2. Verify workspace tenant integrity inside publishing engine
     if (target.account.workspaceId !== target.post.workspaceId) {
       SecurityAudit.log({
         event: "CROSS_TENANT_ATTEMPT",
@@ -46,20 +72,24 @@ export class PublisherService {
           accountWorkspaceId: target.account.workspaceId,
         },
       });
-      await db.postTarget.update({
+      return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
           errorMessage: "Security violation: Account belongs to another workspace.",
+          leaseExpiresAt: null,
         },
       });
-      throw new CrossTenantPublishError();
     }
 
-    // 2. Transition target to PUBLISHING
+    // 3. Compute deterministic idempotency key for provider reconciliation
+    const idempotencyKey =
+      target.idempotencyKey ||
+      `pub_${target.id}_${target.createdAt.getTime()}_r${target.retryCount}`;
+
     await db.postTarget.update({
       where: { id: targetId },
-      data: { status: "PUBLISHING" },
+      data: { idempotencyKey },
     });
 
     const provider = getSocialProvider(target.platform, target.account.isMock ? "mock" : "live");
@@ -80,26 +110,30 @@ export class PublisherService {
       firstComment: target.firstComment,
       videoTitle: target.videoTitle || target.post.title,
       videoTags: target.videoTags,
+      idempotencyKey,
     };
 
-    // 3. Safely decrypt token just-in-time from vault envelope
+    // 4. Safely decrypt token just-in-time from vault envelope
     let decryptedAccessToken: string | null = null;
     try {
       decryptedAccessToken = target.account.accessToken
         ? TokenVault.decrypt(target.account.accessToken, target.account.id)
         : null;
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const error = err as Error;
       SecurityAudit.log({
         event: "TOKEN_TAMPER_DETECTED",
         workspaceId: target.post.workspaceId,
         resourceId: target.account.id,
-        details: { error: err.message },
+        details: { error: error.message },
       });
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
-          errorMessage: `Decryption error: ${err.message}`,
+          errorMessage: `Decryption error: ${error.message}`,
+          retryCount: target.retryCount + 1,
+          leaseExpiresAt: null,
         },
       });
     }
@@ -108,7 +142,7 @@ export class PublisherService {
       const result = await provider.publishPost(
         {
           id: target.account.id,
-          platform: target.platform as any,
+          platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
           platformAccountId: target.account.platformAccountId,
           username: target.account.username,
           displayName: target.account.displayName,
@@ -126,6 +160,8 @@ export class PublisherService {
             platformPostId: result.platformPostId,
             liveUrl: result.liveUrl,
             publishedAt: result.publishedAt || new Date(),
+            leaseExpiresAt: null, // Clear lease
+            errorMessage: null,
           },
         });
 
@@ -142,23 +178,27 @@ export class PublisherService {
           data: {
             status: "FAILED",
             errorMessage: result.error || "Publishing failed",
+            retryCount: target.retryCount + 1,
+            leaseExpiresAt: null, // Release lease for potential retry
           },
         });
       }
-    } catch (publishErr: any) {
+    } catch (publishErr: unknown) {
+      const pErr = publishErr as Error;
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
-          errorMessage: publishErr.message || "Provider runtime error",
+          errorMessage: pErr.message || "Provider runtime error",
+          retryCount: target.retryCount + 1,
+          leaseExpiresAt: null,
         },
       });
     }
   }
 
   /**
-   * Immediately publishes all targets for a given post.
-   * Strictly enforces approvalStatus === 'APPROVED' and accurately calculates status.
+   * Publishes all targets for a given post with approval checks and target status aggregation.
    */
   static async publishPostNow(postId: string) {
     const post = await db.post.findUnique({
@@ -191,20 +231,26 @@ export class PublisherService {
       data: { status: "PUBLISHING" },
     });
 
-    const targetResults = [];
+    // 3. Process each target individually with target-level claims
     for (const target of post.targets) {
-      const res = await this.publishTarget(target.id);
-      targetResults.push(res);
+      await this.publishTarget(target.id);
     }
 
-    // 3. Accurately calculate overall post status based on target outcomes
-    const successfulCount = targetResults.filter((t) => t.status === "PUBLISHED").length;
-    const failedCount = targetResults.filter((t) => t.status === "FAILED").length;
+    // 4. Refresh all targets from DB to compute accurate post-level status
+    const allTargets = await db.postTarget.findMany({
+      where: { postId },
+    });
+
+    const successfulCount = allTargets.filter((t) => t.status === "PUBLISHED").length;
+    const failedCount = allTargets.filter((t) => t.status === "FAILED").length;
+    const pendingCount = allTargets.filter(
+      (t) => t.status === "PENDING" || t.status === "PUBLISHING"
+    ).length;
 
     let finalPostStatus = "PUBLISHED";
-    if (post.targets.length === 0 || successfulCount === 0) {
+    if (allTargets.length === 0 || successfulCount === 0) {
       finalPostStatus = "FAILED";
-    } else if (failedCount > 0 && successfulCount > 0) {
+    } else if (failedCount > 0 || pendingCount > 0) {
       finalPostStatus = "PARTIALLY_PUBLISHED";
     }
 
@@ -212,7 +258,7 @@ export class PublisherService {
       where: { id: postId },
       data: {
         status: finalPostStatus,
-        publishedAt: successfulCount > 0 ? new Date() : null,
+        publishedAt: successfulCount > 0 ? (post.publishedAt || new Date()) : null,
       },
       include: { targets: true },
     });
@@ -221,14 +267,18 @@ export class PublisherService {
   }
 
   /**
-   * Scans for all posts with SCHEDULED status whose scheduledAt has arrived.
-   * Employs ATOMIC JOB CLAIMING (conditional status update) to prevent concurrent double-publishing.
+   * Scans for due posts and publishes them using atomic conditional claiming.
    */
   static async dispatchDuePosts(workspaceId?: string) {
     const now = new Date();
 
-    const whereClause: any = {
-      status: "SCHEDULED",
+    const whereClause: {
+      status: { in: string[] };
+      approvalStatus: string;
+      scheduledAt: { lte: Date };
+      workspaceId?: string;
+    } = {
+      status: { in: ["SCHEDULED", "PARTIALLY_PUBLISHED"] },
       approvalStatus: "APPROVED",
       scheduledAt: {
         lte: now,
@@ -239,21 +289,19 @@ export class PublisherService {
       whereClause.workspaceId = workspaceId;
     }
 
-    // Find candidate posts due for publication
     const candidates = await db.post.findMany({
       where: whereClause,
-      select: { id: true, workspaceId: true },
+      select: { id: true, status: true, workspaceId: true },
     });
 
     const dispatchedResults = [];
 
     for (const candidate of candidates) {
-      // ATOMIC CLAIM: Transition from SCHEDULED to PUBLISHING conditionally
-      // If another worker claimed it between findMany and now, count is 0
+      // ATOMIC CLAIM: Transition conditionally to PUBLISHING
       const claim = await db.post.updateMany({
         where: {
           id: candidate.id,
-          status: "SCHEDULED",
+          status: candidate.status,
           approvalStatus: "APPROVED",
         },
         data: {
@@ -262,16 +310,16 @@ export class PublisherService {
       });
 
       if (claim.count === 0) {
-        // Post already claimed by another concurrent worker or already processed
+        // Post claimed by another concurrent worker
         continue;
       }
 
       try {
         const published = await this.publishPostNow(candidate.id);
         dispatchedResults.push(published);
-      } catch (err: any) {
-        console.error(`Error publishing claimed post ${candidate.id}:`, err?.message || err);
-        // Ensure post doesn't get stuck in PUBLISHING
+      } catch (err: unknown) {
+        const error = err as Error;
+        console.error(`Error publishing claimed post ${candidate.id}:`, error?.message || error);
         await db.post.update({
           where: { id: candidate.id },
           data: { status: "FAILED" },
@@ -286,7 +334,7 @@ export class PublisherService {
   }
 
   /**
-   * Calculates the next open queue time slot for a workspace.
+   * Calculates next open queue slot for workspace.
    */
   static async getNextQueueSlot(workspaceId: string): Promise<Date> {
     const slots = await db.queueSlot.findMany({

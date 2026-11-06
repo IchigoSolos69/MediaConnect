@@ -31,6 +31,7 @@ model User {
   email        String            @unique
   name         String
   passwordHash String?           // Bcrypt hash for credentials login
+  tokenVersion Int               @default(1) // Incremented to invalidate all active sessions
   avatarUrl    String?
   role         String            @default("OWNER") // Legacy top-level role fallback
   workspaceId  String?           // Legacy primary workspace reference
@@ -91,7 +92,7 @@ model Post {
   title          String?
   content        String
   mediaUrls      String        @default("[]") // JSON string array of image/video URLs
-  status         String        @default("DRAFT") // DRAFT, SCHEDULED, PUBLISHING, PUBLISHED, FAILED
+  status         String        @default("DRAFT") // DRAFT, SCHEDULED, PUBLISHING, PUBLISHED, PARTIALLY_PUBLISHED, FAILED
   approvalStatus String        @default("APPROVED") // DRAFT, PENDING_APPROVAL, APPROVED, REJECTED
   approvedById   String?
   approvedAt     DateTime?
@@ -120,9 +121,39 @@ model PostTarget {
   platformPostId  String?
   liveUrl         String?
   errorMessage    String?
+  retryCount      Int       @default(0)
+  maxRetries      Int       @default(3)
+  claimedAt       DateTime?
+  leaseExpiresAt  DateTime?
+  idempotencyKey  String?
   publishedAt     DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+
+  @@index([status, leaseExpiresAt])
+  @@index([idempotencyKey])
+}
+
+model RevokedSession {
+  id        String   @id @default(cuid())
+  jti       String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([jti])
+  @@index([expiresAt])
+}
+
+model RateLimitAttempt {
+  id             String   @id @default(cuid())
+  key            String   @unique
+  attempts       Int      @default(1)
+  firstAttemptAt DateTime @default(now())
+  lastAttemptAt  DateTime @default(now())
+  expiresAt      DateTime
+
+  @@index([key, expiresAt])
 }
 
 model MetricSnapshot {
