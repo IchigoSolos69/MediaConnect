@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { getTokenVaultKey, isProduction } from "../config/secrets";
 
 export class TamperDetectedError extends Error {
   constructor(message = "Cryptographic authentication failed: token payload has been tampered with or corrupted.") {
@@ -16,30 +17,21 @@ export class VaultKeyError extends Error {
   }
 }
 
-// Default development key (32 bytes = 64 hex characters) used only if TOKEN_VAULT_KEY_V1 is not set in environment
-const DEV_FALLBACK_KEY_V1 = "e9b21f98c614b7e1898522e8412e8732a13876d91244e8910248bfb18274619a";
-const DEV_FALLBACK_KEY_V2 = "9a4821fb81bf4820198e44129d67831a2378e2148e2258981e7b416c89f12b9e";
+export class PlaintextTokenRejectedError extends Error {
+  constructor(message = "Unencrypted plaintext token rejected in production environment.") {
+    super(message);
+    this.name = "PlaintextTokenRejectedError";
+    Object.setPrototypeOf(this, PlaintextTokenRejectedError.prototype);
+  }
+}
 
 export class TokenVault {
   private static getKey(version: string): Buffer {
-    const envKey =
-      version === "v1"
-        ? process.env.TOKEN_VAULT_KEY_V1 || DEV_FALLBACK_KEY_V1
-        : version === "v2"
-        ? process.env.TOKEN_VAULT_KEY_V2 || DEV_FALLBACK_KEY_V2
-        : process.env[`TOKEN_VAULT_KEY_${version.toUpperCase()}`];
-
-    if (!envKey) {
-      throw new VaultKeyError(`No cryptographic encryption key configured for version: ${version}`);
+    try {
+      return getTokenVaultKey(version);
+    } catch (err: any) {
+      throw new VaultKeyError(err.message || `No cryptographic encryption key configured for version: ${version}`);
     }
-
-    // Accept 64-char hex string or 32-byte string/base64
-    if (envKey.length === 64 && /^[0-9a-fA-F]+$/.test(envKey)) {
-      return Buffer.from(envKey, "hex");
-    }
-
-    // Fallback: SHA-256 hash to guarantee exact 32 bytes
-    return crypto.createHash("sha256").update(envKey).digest();
   }
 
   public static getActiveVersion(): string {
@@ -91,12 +83,19 @@ export class TokenVault {
   /**
    * Decrypts an encrypted vault envelope using AES-256-GCM.
    * Validates authenticated tag; throws TamperDetectedError on any modification.
+   * In production, unencrypted plaintext tokens fail closed with PlaintextTokenRejectedError.
    */
   public static decrypt(envelope: string, aad?: string): string {
     if (!envelope) return "";
 
-    // If string is not encrypted (e.g. legacy plaintext), return as-is for safe backward compatibility
+    // If string is not encrypted (legacy plaintext):
     if (!this.isEncrypted(envelope)) {
+      if (isProduction()) {
+        throw new PlaintextTokenRejectedError(
+          "Production security violation: Unencrypted plaintext token rejected. All credentials must be stored in encrypted AES-256-GCM vault envelopes."
+        );
+      }
+      console.warn("[SECURITY WARNING] Plaintext token decrypted in development mode. Please run token migration.");
       return envelope;
     }
 
@@ -127,6 +126,7 @@ export class TokenVault {
 
       return plaintext;
     } catch (err: any) {
+      if (err instanceof VaultKeyError) throw err;
       throw new TamperDetectedError(
         `Failed to decrypt token with version [${version}]: ${err.message}`
       );

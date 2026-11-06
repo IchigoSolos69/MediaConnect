@@ -1,46 +1,68 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import {
+  authenticateRequest,
+  authorizeWorkspaceAccess,
+  handleAuthApiError,
+} from "@/lib/auth/server";
+import { CreateQueueSlotSchema } from "@/lib/validation/schemas";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const workspace = await db.workspace.findFirst();
-    if (!workspace) {
-      return NextResponse.json({ success: false, error: "Workspace not found" }, { status: 404 });
-    }
+    const session = await authenticateRequest(request);
+    const { searchParams } = new URL(request.url);
+    const requestedWorkspaceId = searchParams.get("workspaceId") || session.activeWorkspaceId;
+
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      requestedWorkspaceId,
+      "posts:create"
+    );
 
     const slots = await db.queueSlot.findMany({
-      where: { workspaceId: workspace.id },
+      where: { workspaceId: membership.workspaceId },
       orderBy: [{ dayOfWeek: "asc" }, { time: "asc" }],
     });
 
     return NextResponse.json({ success: true, slots });
   } catch (error) {
-    console.error("Error fetching queue slots:", error);
-    return NextResponse.json({ success: false, error: "Failed to fetch queue slots" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { dayOfWeek, time } = body;
+    const session = await authenticateRequest(request);
+    const rawBody = await request.json();
 
-    const workspace = await db.workspace.findFirst();
-    if (!workspace) {
-      return NextResponse.json({ success: false, error: "Workspace not found" }, { status: 404 });
+    const parseResult = CreateQueueSlotSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { success: false, error: parseResult.error.issues[0]?.message || "Invalid input." },
+        { status: 400 }
+      );
     }
+
+    const { dayOfWeek, time, workspaceId: requestedWorkspaceId } = parseResult.data;
+    const targetWorkspaceId = requestedWorkspaceId || session.activeWorkspaceId;
+
+    const membership = await authorizeWorkspaceAccess(
+      session.userId,
+      targetWorkspaceId,
+      "workspace:manage"
+    );
 
     const slot = await db.queueSlot.create({
       data: {
-        workspaceId: workspace.id,
-        dayOfWeek: Number(dayOfWeek),
+        workspaceId: membership.workspaceId,
+        dayOfWeek,
         time,
+        isActive: true,
       },
     });
 
     return NextResponse.json({ success: true, slot });
   } catch (error) {
-    console.error("Error creating queue slot:", error);
-    return NextResponse.json({ success: false, error: "Failed to create queue slot" }, { status: 500 });
+    return handleAuthApiError(error);
   }
 }

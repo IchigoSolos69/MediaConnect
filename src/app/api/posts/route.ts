@@ -7,6 +7,8 @@ import {
   handleAuthApiError,
 } from "@/lib/auth/server";
 import { hasPermission } from "@/lib/auth/permissions";
+import { CreatePostSchema } from "@/lib/validation/schemas";
+import { SecurityAudit } from "@/lib/security/audit";
 
 export async function GET(request: NextRequest) {
   try {
@@ -57,37 +59,80 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await authenticateRequest(request);
+    const rawBody = await request.json();
 
-    const body = await request.json();
+    const parseResult = CreatePostSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { success: false, error: parseResult.error.issues[0]?.message || "Invalid post data." },
+        { status: 400 }
+      );
+    }
+
     const {
       title,
       content,
       mediaUrls,
-      scheduleMode, // "NOW" | "SCHEDULE" | "QUEUE" | "DRAFT"
+      scheduleMode,
       scheduledDate,
       targets,
       seoScore,
       hookScore,
       workspaceId: reqWorkspaceId,
-    } = body;
-
-    if (!content || !targets || targets.length === 0) {
-      return NextResponse.json(
-        { success: false, error: "Content and at least one target channel are required" },
-        { status: 400 }
-      );
-    }
+    } = parseResult.data;
 
     const targetWorkspaceId = reqWorkspaceId || session.activeWorkspaceId;
 
-    // Verify workspace membership and basic post creation right
+    // 1. Verify workspace membership and basic post creation right
     const membership = await authorizeWorkspaceAccess(
       session.userId,
       targetWorkspaceId,
       "posts:create"
     );
 
-    // Enforce Role Permissions for Scheduling vs Drafting
+    // 2. Validate every target account belongs to the authorized workspace (Anti-IDOR / Anti-Cross-Tenant)
+    const targetAccountIds = [...new Set(targets.map((t) => t.accountId))];
+    const authorizedAccounts = await db.account.findMany({
+      where: {
+        id: { in: targetAccountIds },
+        workspaceId: membership.workspaceId,
+      },
+      select: { id: true, platform: true },
+    });
+
+    if (authorizedAccounts.length !== targetAccountIds.length) {
+      SecurityAudit.log({
+        event: "CROSS_TENANT_ATTEMPT",
+        userId: session.userId,
+        workspaceId: membership.workspaceId,
+        details: {
+          requestedAccountIds: targetAccountIds,
+          authorizedCount: authorizedAccounts.length,
+        },
+      });
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Cross-tenant access denied: One or more selected social channels do not belong to your authorized workspace.",
+        },
+        { status: 403 }
+      );
+    }
+
+    // Verify target platforms match account platforms
+    const accountPlatformMap = new Map(authorizedAccounts.map((a) => [a.id, a.platform]));
+    for (const target of targets) {
+      const actualPlatform = accountPlatformMap.get(target.accountId);
+      if (actualPlatform !== target.platform) {
+        return NextResponse.json(
+          { success: false, error: `Platform mismatch for target account ${target.accountId}` },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 3. Enforce Role Permissions for Scheduling vs Immediate Publishing vs Drafting
     const canPublish = hasPermission(membership.role, "posts:publish_now");
     const canApprove = hasPermission(membership.role, "posts:approve");
 
@@ -106,7 +151,7 @@ export async function POST(request: NextRequest) {
     let approvalStatus = "APPROVED";
 
     if (!canApprove && (scheduleMode === "SCHEDULE" || scheduleMode === "QUEUE")) {
-      // Editor submitted scheduled post -> requires approval
+      // Editor submitted scheduled post -> requires approver review
       approvalStatus = "PENDING_APPROVAL";
       initialStatus = "DRAFT";
       finalScheduledAt = scheduledDate ? new Date(scheduledDate) : null;
@@ -137,7 +182,7 @@ export async function POST(request: NextRequest) {
         seoScore: seoScore || 0,
         hookScore: hookScore || 0,
         targets: {
-          create: targets.map((t: any) => ({
+          create: targets.map((t) => ({
             accountId: t.accountId,
             platform: t.platform,
             status: "PENDING",

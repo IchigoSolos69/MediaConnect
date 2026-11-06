@@ -3,21 +3,54 @@ import { db } from "@/lib/db";
 import bcrypt from "bcryptjs";
 import { createSessionToken, SESSION_COOKIE_NAME } from "@/lib/auth/session";
 import { WorkspaceRole } from "@/lib/auth/permissions";
+import { LoginSchema } from "@/lib/validation/schemas";
+import { loginRateLimiter } from "@/lib/security/rate-limiter";
+import { SecurityAudit } from "@/lib/security/audit";
 
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { email, password, workspaceId: requestedWorkspaceId } = body;
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1";
 
-    if (!email || !password) {
+  try {
+    const rawBody = await request.json();
+    const parseResult = LoginSchema.safeParse(rawBody);
+
+    if (!parseResult.success) {
       return NextResponse.json(
-        { success: false, error: "Email and password are required." },
+        { success: false, error: parseResult.error.issues[0]?.message || "Invalid input." },
         { status: 400 }
       );
     }
 
+    const { email, password, workspaceId: requestedWorkspaceId } = parseResult.data;
+    const rateLimitKey = `${ip}:${email.toLowerCase()}`;
+
+    // 1. Check rate limit
+    const limitCheck = loginRateLimiter.check(rateLimitKey);
+    if (!limitCheck.allowed) {
+      SecurityAudit.log({
+        event: "AUTH_RATE_LIMITED",
+        email,
+        ip,
+        details: { retryAfterSeconds: limitCheck.retryAfterSeconds },
+      });
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Too many login attempts. Please try again in ${limitCheck.retryAfterSeconds} seconds.`,
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(limitCheck.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
+    // 2. Lookup user and verify password
     const user = await db.user.findUnique({
-      where: { email: email.toLowerCase().trim() },
+      where: { email: email.toLowerCase() },
       include: {
         memberships: {
           include: {
@@ -28,6 +61,14 @@ export async function POST(request: NextRequest) {
     });
 
     if (!user || !user.passwordHash) {
+      loginRateLimiter.recordFailure(rateLimitKey);
+      SecurityAudit.log({
+        event: "AUTH_FAILURE",
+        email,
+        ip,
+        details: { reason: "User not found or no password configured" },
+      });
+
       return NextResponse.json(
         { success: false, error: "Invalid email or password." },
         { status: 401 }
@@ -36,6 +77,15 @@ export async function POST(request: NextRequest) {
 
     const passwordValid = await bcrypt.compare(password, user.passwordHash);
     if (!passwordValid) {
+      loginRateLimiter.recordFailure(rateLimitKey);
+      SecurityAudit.log({
+        event: "AUTH_FAILURE",
+        email,
+        userId: user.id,
+        ip,
+        details: { reason: "Password mismatch" },
+      });
+
       return NextResponse.json(
         { success: false, error: "Invalid email or password." },
         { status: 401 }
@@ -49,7 +99,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Determine active workspace
+    // Reset rate limit on success
+    loginRateLimiter.reset(rateLimitKey);
+
+    // 3. Determine active workspace
     let activeMembership = user.memberships[0];
     if (requestedWorkspaceId) {
       const match = user.memberships.find((m) => m.workspaceId === requestedWorkspaceId);
@@ -66,9 +119,17 @@ export async function POST(request: NextRequest) {
 
     const token = await createSessionToken(sessionPayload);
 
+    SecurityAudit.log({
+      event: "AUTH_SUCCESS",
+      userId: user.id,
+      email: user.email,
+      workspaceId: activeMembership.workspaceId,
+      ip,
+    });
+
+    // 4. Return strictly HttpOnly cookie session — NEVER return token in JSON response
     const response = NextResponse.json({
       success: true,
-      token, // Also return for Bearer token authorization in API tests
       user: {
         id: user.id,
         email: user.email,
@@ -88,7 +149,6 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Set secure HTTPOnly session cookie
     response.cookies.set({
       name: SESSION_COOKIE_NAME,
       value: token,
@@ -101,9 +161,9 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error: any) {
-    console.error("Login API error:", error);
+    console.error("Login API error:", error?.message || error);
     return NextResponse.json(
-      { success: false, error: error.message || "Failed to authenticate" },
+      { success: false, error: "Authentication failed. Please try again." },
       { status: 500 }
     );
   }

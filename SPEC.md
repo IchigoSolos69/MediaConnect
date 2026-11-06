@@ -15,13 +15,13 @@ MediaConnect is an all-in-one social media management, visual scheduling, analyt
 | :--- | :--- | :--- |
 | **Framework** | Next.js 15 (App Router, React 19, TypeScript) | Open Source (MIT) |
 | **Styling & UI** | Tailwind CSS v4, Lucide React | Open Source |
-| **Authentication** | Auth.js (NextAuth v5) + bcryptjs | Secure server-side session cookies, separate from social OAuth |
-| **Token Vault** | AES-256-GCM + Key Versioning | Authenticated encryption with unique IV per record, zero plaintext exposure |
-| **Database** | PostgreSQL + Prisma ORM | SQLite locally ($0) / Neon / Supabase free tier in production |
-| **Queue & Scheduling** | Upstash QStash / BullMQ + Redis | Local interval runner ($0) / Upstash free tier (500 cron msgs/day) |
+| **Authentication** | Edge JWT (`jose`) + `bcryptjs` | HttpOnly, Secure, SameSite=Lax session cookies; rate-limited; zero token exposure in JSON responses |
+| **Token Vault** | AES-256-GCM + Key Versioning | Authenticated encryption with unique 12-byte IV per record, AAD account binding, fail-closed in production |
+| **Database** | PostgreSQL + Prisma ORM | SQLite locally (`dev.db`) / Supabase / Neon in production; explicit `WorkspaceMember` multi-tenancy |
+| **Queue & Scheduling** | Upstash QStash / Atomic Runner | Atomic job claiming (`status: PUBLISHING`) preventing duplicate publication across concurrent workers |
 | **Storage** | Cloudflare R2 / S3 Presigned URLs | 10 GB free tier on Cloudflare R2 |
 | **AI & SEO Engine** | Configurable LLM (Google Gemini / OpenAI) | Configurable model identifier (`GEMINI_MODEL`, e.g. `gemini-1.5-flash`) |
-| **Social Adapters** | Dual Mode: Mock Sandbox Engine + Live OAuth | **YouTube:** 100 `videos.insert` calls/day under current quota rules.<br>**Instagram:** Evaluates both Instagram Login (no FB page required) and Facebook Login.<br>**X (Twitter):** Consumption-based pricing (~$0.015/post creation). Mock mode default; requires explicit billing authorization before paid calls. |
+| **Social Adapters** | Dual Mode: Mock Sandbox Engine + Live OAuth | **YouTube:** 100 `videos.insert` calls/day under current quota rules.<br>**Instagram:** Direct Instagram Login primary; Facebook Login secondary.<br>**X (Twitter):** Consumption-based pricing (~$0.015/post creation). Mock mode default; requires explicit billing authorization before paid calls. |
 
 ---
 

@@ -6,6 +6,7 @@ import {
   SESSION_COOKIE_NAME,
 } from "./session";
 import { hasPermission, PermissionAction, WorkspaceRole } from "./permissions";
+import { SecurityAudit } from "../security/audit";
 
 export class AuthError extends Error {
   public statusCode: number;
@@ -26,7 +27,7 @@ export class ForbiddenError extends Error {
 }
 
 /**
- * Extracts and verifies the session from either Authorization header or cookie.
+ * Extracts and verifies the session from cookie or Authorization Bearer header.
  * Throws AuthError(401) if missing or invalid.
  */
 export async function authenticateRequest(
@@ -34,15 +35,15 @@ export async function authenticateRequest(
 ): Promise<AuthSessionPayload> {
   let token: string | undefined;
 
-  // 1. Check Authorization Bearer header
-  const authHeader = request.headers.get("authorization");
-  if (authHeader?.startsWith("Bearer ")) {
-    token = authHeader.substring(7).trim();
-  }
+  // 1. Primary: Extract from HttpOnly session cookie
+  token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
 
-  // 2. Fallback to cookie
+  // 2. Secondary: Bearer token (for programmatic / internal API access)
   if (!token) {
-    token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+    const authHeader = request.headers.get("authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      token = authHeader.substring(7).trim();
+    }
   }
 
   if (!token) {
@@ -80,12 +81,24 @@ export async function authorizeWorkspaceAccess(
   });
 
   if (!membership) {
+    SecurityAudit.log({
+      event: "CROSS_TENANT_ATTEMPT",
+      userId,
+      targetWorkspaceId,
+      details: { action: requiredAction },
+    });
     throw new ForbiddenError(
       "Cross-tenant access denied: You are not an authorized member of this workspace."
     );
   }
 
   if (requiredAction && !hasPermission(membership.role, requiredAction)) {
+    SecurityAudit.log({
+      event: "PRIVILEGE_ESCALATION_ATTEMPT",
+      userId,
+      workspaceId: targetWorkspaceId,
+      details: { role: membership.role, requiredAction },
+    });
     throw new ForbiddenError(
       `Permission denied: Your role [${membership.role}] is not authorized to perform [${requiredAction}].`
     );
@@ -111,9 +124,9 @@ export function handleAuthApiError(error: any) {
     );
   }
 
-  console.error("Unhandled API Error:", error);
+  console.error("Unhandled API Error:", error?.message || error);
   return NextResponse.json(
-    { success: false, error: error.message || "Internal server error" },
+    { success: false, error: "An unexpected error occurred." },
     { status: 500 }
   );
 }

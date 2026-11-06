@@ -1,0 +1,58 @@
+name: MediaConnect CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-and-build:
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: "file:./prisma/dev.db"
+      NEXT_PUBLIC_SOCIAL_MODE: "mock"
+      AUTH_SECRET: "ci_testing_auth_secret_minimum_32_characters_long_super_secure"
+      TOKEN_VAULT_KEY_V1: "e9b21f98c614b7e1898522e8412e8732a13876d91244e8910248bfb18274619a"
+      TOKEN_VAULT_KEY_V2: "9a4821fb81bf4820198e44129d67831a2378e2148e2258981e7b416c89f12b9e"
+      DISPATCH_SECRET: "ci_testing_dispatch_cron_secret_32bytes_long_key"
+      TOKEN_VAULT_ACTIVE_VERSION: "v1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Push Database Schema
+        run: npx prisma db push
+
+      - name: Run Token Migration & Vault Verification
+        run: npx tsx src/scripts/migrate-tokens.ts --verify
+
+      - name: Run Token Vault Cryptographic Tests
+        run: npx tsx src/test-token-vault.ts
+
+      - name: Run Security & Multi-Tenancy Integration Test Suite
+        run: npx tsx src/test-milestone-6a1.ts
+
+      - name: TypeScript Type Check
+        run: npx tsc --noEmit
+
+      - name: Run Production Next.js Build
+        run: npm run build

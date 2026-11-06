@@ -1,4 +1,4 @@
-import { TokenVault, TamperDetectedError } from "./lib/crypto/vault";
+import { TokenVault, TamperDetectedError, PlaintextTokenRejectedError } from "./lib/crypto/vault";
 
 async function verifyTokenVault() {
   console.log("🧪 Running Cryptographic Token Vault Verification Suite...\n");
@@ -29,7 +29,6 @@ async function verifyTokenVault() {
   // 3. Tamper Detection - Modified Ciphertext
   console.log("\n2. Tamper Detection Tests:");
   const parts = enc1.split(":");
-  // Flip a character in ciphertext
   const tamperedCipher = parts[3].slice(0, -2) + (parts[3].endsWith("aa") ? "bb" : "aa");
   const tamperedEnvelope = `${parts[0]}:${parts[1]}:${parts[2]}:${tamperedCipher}:${parts[4]}`;
 
@@ -40,8 +39,6 @@ async function verifyTokenVault() {
     if (err instanceof TamperDetectedError || err.name === "TamperDetectedError") {
       tamperCaught = true;
       console.log(`   ✓ Tampered ciphertext correctly rejected: ${err.message}`);
-    } else {
-      console.error("Unexpected error caught:", err);
     }
   }
   if (!tamperCaught) {
@@ -59,8 +56,6 @@ async function verifyTokenVault() {
     if (err instanceof TamperDetectedError || err.name === "TamperDetectedError") {
       tagTamperCaught = true;
       console.log(`   ✓ Tampered auth tag correctly rejected: ${err.message}`);
-    } else {
-      console.error("Unexpected error caught:", err);
     }
   }
   if (!tagTamperCaught) {
@@ -75,16 +70,35 @@ async function verifyTokenVault() {
     if (err instanceof TamperDetectedError || err.name === "TamperDetectedError") {
       aadTamperCaught = true;
       console.log(`   ✓ Cross-record token swap (AAD mismatch) correctly rejected: ${err.message}`);
-    } else {
-      console.error("Unexpected error caught:", err);
     }
   }
   if (!aadTamperCaught) {
     throw new Error("Security failure: AAD mismatch was not rejected!");
   }
 
-  // 6. Key Rotation (v1 -> v2)
-  console.log("\n3. Key Rotation Verification:");
+  // 6. Fail-Closed on Unencrypted Plaintext Tokens in Production Mode
+  console.log("\n3. Fail-Closed Plaintext Rejection in Production Mode:");
+  const originalEnv = process.env.NODE_ENV;
+  try {
+    (process.env as any).NODE_ENV = "production";
+    let plaintextRejected = false;
+    try {
+      TokenVault.decrypt("unencrypted_raw_api_secret_12345", accountAad);
+    } catch (err: any) {
+      if (err instanceof PlaintextTokenRejectedError || err.name === "PlaintextTokenRejectedError") {
+        plaintextRejected = true;
+        console.log(`   ✓ Plaintext token fail-closed rejected in production: ${err.message}`);
+      }
+    }
+    if (!plaintextRejected) {
+      throw new Error("Security failure: Plaintext token was accepted in production mode!");
+    }
+  } finally {
+    (process.env as any).NODE_ENV = originalEnv;
+  }
+
+  // 7. Key Rotation (v1 -> v2)
+  console.log("\n4. Key Rotation Verification:");
   const rotated = TokenVault.rotate(enc1, "v2", accountAad);
   console.log(`   Rotated envelope: ${rotated.substring(0, 35)}...`);
   if (!rotated.startsWith("enc:v2:")) {
@@ -99,7 +113,7 @@ async function verifyTokenVault() {
   console.log("\n🎉 ALL TOKEN VAULT CRYPTOGRAPHIC TESTS PASSED!");
 }
 
-verifyTokenVault().catch((err) => {
-  console.error("❌ Token Vault verification failed:", err);
+verifyTokenVault().catch((e) => {
+  console.error(e);
   process.exit(1);
 });

@@ -3,42 +3,93 @@ import { TokenVault } from "../lib/crypto/vault";
 import bcrypt from "bcryptjs";
 
 async function runMigration() {
-  console.log("🔒 Running Milestone 6A Token & Membership Migration...\n");
+  const args = process.argv.slice(2);
+  const verifyOnly = args.includes("--verify");
 
-  // 1. Encrypt all plaintext account tokens
+  console.log("==================================================================");
+  console.log("🔒 MEDIACONNECT CRYPTOGRAPHIC TOKEN VAULT MIGRATION & AUDIT TOOL");
+  console.log("==================================================================\n");
+
+  // 1. Inspect all account credentials in database
   const accounts = await db.account.findMany();
-  console.log(`Found ${accounts.length} social accounts to inspect for token encryption...`);
+  console.log(`Auditing ${accounts.length} social accounts in database...`);
 
-  let encryptedCount = 0;
+  let alreadyEncrypted = 0;
+  let migratedCount = 0;
+  let verificationFailures = 0;
+
   for (const acc of accounts) {
-    let needsUpdate = false;
-    let tokenToEncrypt = acc.accessToken;
+    let decrypted: string | null = null;
+    let aadUsed = acc.id;
 
-    if (!tokenToEncrypt) {
-      tokenToEncrypt = `mock_${acc.platform.toLowerCase()}_token_${Math.random().toString(36).slice(2)}`;
-      needsUpdate = true;
-    }
+    if (TokenVault.isEncrypted(acc.accessToken)) {
+      try {
+        decrypted = TokenVault.decrypt(acc.accessToken!, acc.id);
+      } catch {
+        // Try fallback AAD with platformAccountId for legacy accounts
+        try {
+          decrypted = TokenVault.decrypt(acc.accessToken!, acc.platformAccountId);
+          aadUsed = acc.platformAccountId;
+        } catch {
+          decrypted = null;
+        }
+      }
 
-    let encryptedAccess = acc.accessToken;
-    if (tokenToEncrypt && !TokenVault.isEncrypted(tokenToEncrypt)) {
-      encryptedAccess = TokenVault.encrypt(tokenToEncrypt, acc.id, "v1");
-      needsUpdate = true;
-    }
+      if (decrypted) {
+        // If it was encrypted with legacy AAD, re-encrypt with canonical acc.id
+        if (aadUsed !== acc.id && !verifyOnly) {
+          const canonicalEncrypted = TokenVault.encrypt(decrypted, acc.id, "v1");
+          await db.account.update({
+            where: { id: acc.id },
+            data: { accessToken: canonicalEncrypted },
+          });
+          console.log(`  ✓ Account ${acc.id} (${acc.username}) re-bound to canonical account.id AAD.`);
+        }
+        alreadyEncrypted++;
+      } else {
+        console.error(`  ❌ [DECRYPTION FAILED] Account ${acc.id} (${acc.username}): Cryptographic authentication failed.`);
+        verificationFailures++;
+      }
+    } else {
+      if (verifyOnly) {
+        console.warn(`  ⚠️ [UNENCRYPTED] Account ${acc.id} (${acc.username}): Found unencrypted plaintext token.`);
+        continue;
+      }
 
-    if (needsUpdate) {
+      // Perform verified zero-downtime migration to AES-256-GCM vault envelope
+      const plaintext = acc.accessToken || `mock_${acc.platform.toLowerCase()}_token_${acc.id}`;
+      const encryptedEnvelope = TokenVault.encrypt(plaintext, acc.id, "v1");
+
+      // Verify before write (pre-flight roundtrip check)
+      const testDecrypted = TokenVault.decrypt(encryptedEnvelope, acc.id);
+      if (testDecrypted !== plaintext) {
+        throw new Error(`Roundtrip verification failed for account ${acc.id}. Aborting migration.`);
+      }
+
       await db.account.update({
         where: { id: acc.id },
         data: {
-          accessToken: encryptedAccess,
+          accessToken: encryptedEnvelope,
           tokenKeyVersion: "v1",
         },
       });
-      encryptedCount++;
+
+      migratedCount++;
+      console.log(`  ✓ Account ${acc.id} (${acc.username}) safely migrated to AES-256-GCM vault envelope.`);
     }
   }
-  console.log(`✓ Plaintext tokens encrypted: ${encryptedCount} accounts updated to AES-256-GCM vault.`);
 
-  // 2. Setup Multi-Tenant Workspaces & Role Memberships
+  console.log(`\nAccount Audit Summary:`);
+  console.log(`  - Total Accounts: ${accounts.length}`);
+  console.log(`  - Already Encrypted: ${alreadyEncrypted}`);
+  console.log(`  - Newly Migrated: ${migratedCount}`);
+  console.log(`  - Verification Failures: ${verificationFailures}`);
+
+  if (verificationFailures > 0) {
+    throw new Error(`Migration completed with ${verificationFailures} cryptographic verification failures.`);
+  }
+
+  // 2. Ensure Primary Workspace and Isolated Tenant exist
   let primaryWorkspace = await db.workspace.findFirst({ where: { slug: "acme-media" } });
   if (!primaryWorkspace) {
     primaryWorkspace = await db.workspace.create({
@@ -49,7 +100,6 @@ async function runMigration() {
     });
   }
 
-  // Create or find isolated secondary workspace for tenant-isolation testing
   let betaWorkspace = await db.workspace.findFirst({ where: { slug: "beta-agency" } });
   if (!betaWorkspace) {
     betaWorkspace = await db.workspace.create({
@@ -59,7 +109,6 @@ async function runMigration() {
       },
     });
 
-    // Create an account in Beta Agency
     await db.account.create({
       data: {
         workspaceId: betaWorkspace.id,
@@ -74,11 +123,11 @@ async function runMigration() {
     });
   }
 
-  // 3. Seed / Update Verified Users with Hashed Passwords & Workspace Roles
+  // 3. User Seed / Migration (SAFE: Never overwrite existing user passwords)
   const defaultPassword = "Password123!";
-  const passwordHash = await bcrypt.hash(defaultPassword, 10);
+  const newPasswordHash = await bcrypt.hash(defaultPassword, 12);
 
-  const usersToSeed = [
+  const usersToEnsure = [
     {
       email: "owner@mediaconnect.app",
       name: "Alice Owner",
@@ -105,29 +154,46 @@ async function runMigration() {
     },
   ];
 
-  for (const u of usersToSeed) {
-    const user = await db.user.upsert({
-      where: { email: u.email },
-      update: {
-        name: u.name,
-        passwordHash,
-        workspaceId: u.workspaceId,
-      },
-      create: {
-        email: u.email,
-        name: u.name,
-        passwordHash,
-        workspaceId: u.workspaceId,
-        role: u.role,
-      },
-    });
+  for (const u of usersToEnsure) {
+    const existing = await db.user.findUnique({ where: { email: u.email } });
 
-    // Ensure WorkspaceMember record
+    let userId = existing?.id;
+
+    if (!existing) {
+      // New user creation
+      const created = await db.user.create({
+        data: {
+          email: u.email,
+          name: u.name,
+          passwordHash: newPasswordHash,
+          workspaceId: u.workspaceId,
+          role: u.role,
+        },
+      });
+      userId = created.id;
+      console.log(`  ✓ Created user [${u.email}] with role [${u.role}]`);
+    } else {
+      // Existing user: NEVER reset or overwrite existing passwordHash!
+      const updateData: any = { name: u.name };
+      if (!existing.passwordHash) {
+        updateData.passwordHash = newPasswordHash;
+        console.log(`  ✓ Configured initial password for passwordless user [${u.email}]`);
+      } else {
+        console.log(`  ✓ Preserved existing password for user [${u.email}] (No password reset)`);
+      }
+
+      await db.user.update({
+        where: { id: existing.id },
+        data: updateData,
+      });
+    }
+
+    // Ensure WorkspaceMember record exists
     await db.workspaceMember.upsert({
       where: {
         workspaceId_userId: {
           workspaceId: u.workspaceId,
-          userId: user.id,
+          userId: userId!,
         },
       },
       update: {
@@ -135,15 +201,13 @@ async function runMigration() {
       },
       create: {
         workspaceId: u.workspaceId,
-        userId: user.id,
+        userId: userId!,
         role: u.role,
       },
     });
-
-    console.log(`  ✓ User [${u.email}] linked to workspace [${u.workspaceId}] as ${u.role}`);
   }
 
-  console.log("\n🎉 Milestone 6A Token & Membership Migration Completed Successfully!");
+  console.log("\n🎉 Migration & Security Audit Finished Successfully!");
 }
 
 runMigration()

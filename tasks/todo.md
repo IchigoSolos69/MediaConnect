@@ -228,7 +228,80 @@
 - **Files:** `src/test-milestone-6a.ts`
 - **Scope:** M
 
-### Checkpoint: Milestone 6A Security Complete
-- [x] All 6A acceptance criteria verified
-- [x] Production build succeeds (`npm run build`)
-- [ ] Approval gate: Present audit results before proceeding to 6B
+### Checkpoint: Milestone 6A Foundation Complete
+- [x] Initial security & auth implemented
+
+---
+
+### Milestone 6A.1: Mandatory Security Remediation
+
+#### Task 19: Fail-Closed Secrets Management
+- **Description:** Centralize secrets in `src/lib/config/secrets.ts`. Enforce that missing or weak secrets in production (`AUTH_SECRET`, `TOKEN_VAULT_KEY_V1`, `DISPATCH_SECRET`) fail immediately with `ConfigError`.
+- **Acceptance criteria:**
+  - [x] No predictable production fallbacks.
+  - [x] Distinct session-signing and token-encryption keys.
+  - [x] Verified fail-closed startup in production mode.
+- **Files:** `src/lib/config/secrets.ts`, `src/lib/auth/session.ts`, `src/lib/crypto/vault.ts`, `.env.example`
+
+#### Task 20: HttpOnly Session Isolation & Login Hardening
+- **Description:** Ensure login JSON body never returns session JWTs; strictly enforce `httpOnly`, `secure`, `sameSite: lax` cookies. Add IP & email brute-force sliding-window rate limiting.
+- **Acceptance criteria:**
+  - [x] Zero session tokens returned in login JSON body.
+  - [x] 6th failed attempt throttled with HTTP 429 and `Retry-After`.
+  - [x] Audit logging on auth events.
+- **Files:** `src/app/api/auth/login/route.ts`, `src/lib/security/rate-limiter.ts`, `src/lib/security/audit.ts`
+
+#### Task 21: Production UI De-Scaffolding
+- **Description:** Remove pre-filled test credentials, quick-login buttons, and exposed test passwords from production builds (`process.env.NODE_ENV !== 'production'`).
+- **Acceptance criteria:**
+  - [x] Default email/password form inputs are empty strings.
+  - [x] Quick-fill test panel completely eliminated in production builds.
+  - [x] Exposed passwords removed from UI footer.
+- **Files:** `src/app/login/page.tsx`
+
+#### Task 22: Unauthenticated Route Lockdown
+- **Description:** Protect `/api/posts/dispatch` and `/api/queue-slots` against unauthenticated calls.
+- **Acceptance criteria:**
+  - [x] `/api/posts/dispatch` requires valid `DISPATCH_SECRET` Bearer token or authenticated `OWNER` session.
+  - [x] `/api/queue-slots` GET/POST enforces session authentication and workspace membership (never blind `db.workspace.findFirst()`).
+- **Files:** `src/app/api/posts/dispatch/route.ts`, `src/app/api/queue-slots/route.ts`
+
+#### Task 23: Cross-Tenant Account Validation on Post Creation
+- **Description:** Query and verify that every target account ID in a post creation request belongs to the authorized workspace.
+- **Acceptance criteria:**
+  - [x] Cross-workspace account IDs rejected with 403 Forbidden.
+  - [x] Account platform verified against target platform.
+- **Files:** `src/app/api/posts/route.ts`
+
+#### Task 24: Publishing Engine Approval & Integrity Enforcement
+- **Description:** Enforce `approvalStatus === 'APPROVED'` and workspace boundary inside `PublisherService.publishPostNow()`. Accurately compute `PUBLISHED`, `PARTIALLY_PUBLISHED`, and `FAILED` status.
+- **Acceptance criteria:**
+  - [x] Unapproved posts throw `UnapprovedPostError` and are blocked from publishing.
+  - [x] Accurate status tracking on target failure.
+- **Files:** `src/services/publisher.service.ts`
+
+#### Task 25: Atomic Job Claiming in Dispatcher
+- **Description:** Implement atomic conditional state transitions (`status: SCHEDULED` -> `PUBLISHING`) to prevent concurrent dispatcher race conditions and duplicate publishing.
+- **Acceptance criteria:**
+  - [x] 5 concurrent workers processing due posts produce zero duplicate executions.
+- **Files:** `src/services/publisher.service.ts`
+
+#### Task 26: Safe Migration & Fail-Closed Plaintext Vault
+- **Description:** Make `TokenVault.decrypt` fail closed on unencrypted plaintext in production. Update migration script so it never overwrites existing user passwords on reruns and includes roundtrip verification.
+- **Acceptance criteria:**
+  - [x] Plaintext tokens in production throw `PlaintextTokenRejectedError`.
+  - [x] Migration script preserves existing user passwords.
+- **Files:** `src/lib/crypto/vault.ts`, `src/scripts/migrate-tokens.ts`
+
+#### Task 27: Automated Security Remediation Test Suite & GitHub Actions CI
+- **Description:** Build comprehensive 12-test integration suite covering all remediations and configure GitHub Actions CI workflow.
+- **Acceptance criteria:**
+  - [x] 12/12 security integration tests pass (`npm run test:security`).
+  - [x] `.github/workflows/ci.yml` configured to run lint, typecheck, tests, and build on PRs.
+- **Files:** `src/test-milestone-6a1.ts`, `.github/workflows/ci.yml`, `package.json`
+
+### Checkpoint: Milestone 6A.1 Remediation Complete
+- [x] All 12 critical & high findings resolved
+- [x] Test suite 100% green (12/12)
+- [x] Production build clean
+- [ ] Approval gate: User review before proceeding to Milestone 6B

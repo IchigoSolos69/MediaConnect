@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:vault": "tsx src/test-token-vault.ts",
+    "test:security": "tsx src/test-milestone-6a1.ts",
+    "test": "tsx src/test-token-vault.ts; tsx src/test-milestone-6a1.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

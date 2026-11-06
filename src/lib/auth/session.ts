@@ -1,10 +1,7 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { WorkspaceRole } from "./permissions";
-
-const SESSION_SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET || "dev_secret_mediaconnect_auth_vault_key_2026_super_secure_32bytes"
-);
+import { getAuthSecret } from "../config/secrets";
 
 export const SESSION_COOKIE_NAME = "mc_session";
 
@@ -14,17 +11,21 @@ export interface AuthSessionPayload {
   name: string;
   activeWorkspaceId: string;
   role: WorkspaceRole;
+  iat?: number;
+  exp?: number;
 }
 
 /**
- * Creates a signed, encrypted JWT session token valid for 7 days.
+ * Creates a signed JWT session token valid for 7 days.
+ * Strictly uses getAuthSecret() which enforces production strength and fails closed.
  */
-export async function createSessionToken(payload: AuthSessionPayload): Promise<string> {
+export async function createSessionToken(payload: Omit<AuthSessionPayload, "iat" | "exp">): Promise<string> {
+  const secret = getAuthSecret();
   return await new SignJWT({ ...payload })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("7d")
-    .sign(SESSION_SECRET);
+    .sign(secret);
 }
 
 /**
@@ -33,7 +34,8 @@ export async function createSessionToken(payload: AuthSessionPayload): Promise<s
  */
 export async function verifySessionToken(token: string): Promise<AuthSessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, SESSION_SECRET);
+    const secret = getAuthSecret();
+    const { payload } = await jwtVerify(token, secret);
     return payload as unknown as AuthSessionPayload;
   } catch {
     return null;
