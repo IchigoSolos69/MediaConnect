@@ -44,25 +44,25 @@
 ### Task 4: Workspace & Brand Profile Management UI
 - **Description:** Build responsive navigation, workspace switcher, and brand settings dashboard view.
 - **Acceptance criteria:**
-  - [ ] Main dashboard layout with sidebar navigation (Planner, Analytics, SEO Studio, Channels, Settings).
-  - [ ] Top bar with active workspace badge and brand switcher dropdown.
-  - [ ] Dashboard overview page summarizing scheduled posts and account health.
+  - [x] Main dashboard layout with sidebar navigation (Planner, Analytics, SEO Studio, Channels, Settings).
+  - [x] Top bar with active workspace badge and brand switcher dropdown.
+  - [x] Dashboard overview page summarizing scheduled posts and account health.
 - **Verification:** Manual check of layout, navigation, and workspace switching.
-- **Files:** `src/components/layout/*.tsx`, `src/app/(dashboard)/layout.tsx`, `src/app/(dashboard)/page.tsx`
+- **Files:** `src/components/layout/*.tsx`, `src/app/(dashboard)/layout.tsx`, `src/app/page.tsx`
 - **Scope:** M
 
 ### Task 5: Social Channel Connection Hub
 - **Description:** Build the Connected Accounts management interface supporting 1-click mock connection and live OAuth configuration for YouTube, Instagram, and X.
 - **Acceptance criteria:**
-  - [ ] Channels page displaying connection cards for YouTube, Instagram, and X.
-  - [ ] 1-Click "Connect Mock Account" button linking an account immediately with profile avatar and follower count.
-  - [ ] Disconnect/reconnect functionality and account status badges (Active, Token Expired).
+  - [x] Channels page displaying connection cards for YouTube, Instagram, and X.
+  - [x] 1-Click "Connect Mock Account" button linking an account immediately with profile avatar and follower count.
+  - [x] Disconnect/reconnect functionality and account status badges (Active, Token Expired).
 - **Verification:** Connecting and disconnecting accounts updates database and UI immediately.
-- **Files:** `src/app/(dashboard)/channels/page.tsx`, `src/components/channels/*.tsx`, `src/app/api/accounts/route.ts`
+- **Files:** `src/app/channels/page.tsx`, `src/components/channels/*.tsx`, `src/app/api/accounts/route.ts`
 - **Scope:** M
 
 ### Checkpoint: Workspace & Accounts Complete
-- [ ] Connected channels display in real time with operational status
+- [x] Connected channels display in real time with operational status
 
 ---
 
