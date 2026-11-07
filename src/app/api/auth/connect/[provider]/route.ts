@@ -33,11 +33,12 @@ export async function GET(
 
     const providerInstance = getSocialProvider(normalizedPlatform, socialMode);
 
-    // Generate persistent, single-use signed CSRF state + PKCE code_challenge
+    // Generate persistent, single-use signed CSRF state + PKCE code_challenge bound to socialMode
     const { stateToken, codeChallenge } = await createOAuthState(
       targetWorkspaceId,
       session.userId,
-      normalizedPlatform
+      normalizedPlatform,
+      socialMode
     );
 
     const authUrl = await providerInstance.getAuthUrl(stateToken, codeChallenge);

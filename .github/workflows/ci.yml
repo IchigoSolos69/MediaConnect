@@ -60,6 +60,9 @@ jobs:
       - name: Run Phase 6B Deterministic Live Provider & Storage Suite
         run: npx tsx src/test-phase-6b.ts
 
+      - name: Run Phase 6C Authorization, Analytics, AI SEO & PDF Suite
+        run: npx tsx src/test-phase-6c.ts
+
       - name: TypeScript Type Check
         run: npx tsc --noEmit
 

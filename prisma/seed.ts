@@ -244,6 +244,51 @@ async function main() {
     ],
   });
 
+  // 7. Seed 7 days of mock MetricSnapshots for Acme Media's mock accounts
+  const mockAccounts = [
+    { acc: ytAccount, baseImp: 4200, baseReach: 3800, baseEng: 310, baseFollowers: 48000 },
+    { acc: igAccount, baseImp: 9500, baseReach: 8100, baseEng: 680, baseFollowers: 124000 },
+    { acc: xAccount, baseImp: 6100, baseReach: 5200, baseEng: 290, baseFollowers: 88900 },
+  ];
+
+  const todayMidnight = new Date();
+  todayMidnight.setUTCHours(0, 0, 0, 0);
+
+  for (const item of mockAccounts) {
+    for (let d = 6; d >= 0; d--) {
+      const snapDate = new Date(todayMidnight);
+      snapDate.setUTCDate(snapDate.getUTCDate() - d);
+      const step = 6 - d;
+      await prisma.metricSnapshot.create({
+        data: {
+          accountId: item.acc.id,
+          date: snapDate,
+          impressions: item.baseImp + step * 150,
+          reach: item.baseReach + step * 120,
+          engagements: item.baseEng + step * 18,
+          likes: Math.floor((item.baseEng + step * 18) * 0.7),
+          comments: Math.floor((item.baseEng + step * 18) * 0.2),
+          shares: Math.floor((item.baseEng + step * 18) * 0.1),
+          clicks: 45 + step * 5,
+          videoViews: item.acc.platform === "YOUTUBE" ? item.baseImp + step * 150 : 0,
+          followers: item.baseFollowers + step * 35,
+          source: "MOCK_SANDBOX",
+          availableMetrics: JSON.stringify([
+            "impressions",
+            "reach",
+            "engagements",
+            "likes",
+            "comments",
+            "shares",
+            "clicks",
+            "followers",
+          ]),
+          syncedAt: new Date(),
+        },
+      });
+    }
+  }
+
   console.log("✓ Fixtures seeded successfully: Acme Media (3 accounts), Beta Agency (1 account), 4 users with RBAC.");
 }
 

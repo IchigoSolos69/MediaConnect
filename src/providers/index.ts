@@ -44,6 +44,45 @@ export function getSocialProvider(
   return mock;
 }
 
+/**
+ * Reports whether live OAuth and API integration is authorized and configured on the server per platform.
+ */
+export function getLiveIntegrationStatus(): Record<SocialPlatform, { enabled: boolean; reason?: string }> {
+  const ytConfigured = Boolean(process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET);
+  const igConfigured = Boolean(
+    (process.env.META_APP_ID || process.env.INSTAGRAM_CLIENT_ID) &&
+      (process.env.META_APP_SECRET || process.env.INSTAGRAM_CLIENT_SECRET)
+  );
+  const xKeysConfigured = Boolean(
+    (process.env.TWITTER_CLIENT_ID || process.env.X_CLIENT_ID) &&
+      (process.env.TWITTER_CLIENT_SECRET || process.env.X_CLIENT_SECRET)
+  );
+  const xPaidAuthorized = process.env.ALLOW_PAID_X_API === "true";
+
+  return {
+    YOUTUBE: {
+      enabled: ytConfigured,
+      reason: ytConfigured
+        ? undefined
+        : "YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET are not configured on the server.",
+    },
+    INSTAGRAM: {
+      enabled: igConfigured,
+      reason: igConfigured
+        ? undefined
+        : "META_APP_ID and META_APP_SECRET are not configured on the server.",
+    },
+    X: {
+      enabled: xKeysConfigured && xPaidAuthorized,
+      reason: !xKeysConfigured
+        ? "TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET are not configured on the server."
+        : !xPaidAuthorized
+        ? "Live X API requires explicit billing authorization (ALLOW_PAID_X_API=true)."
+        : undefined,
+    },
+  };
+}
+
 export * from "./types";
 export { YouTubeLiveProvider, YouTubeQuotaManager } from "./live/youtube.provider";
 export { InstagramLiveProvider, InstagramMediaProcessingError } from "./live/instagram.provider";

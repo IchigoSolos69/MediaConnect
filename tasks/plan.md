@@ -80,10 +80,23 @@ MediaConnect is an all-in-one social media management, visual scheduling, analyt
 - X Live Adapter: Consumption-based billing disclaimer, mock mode preservation.
 - Publishing Reliability: Upstash QStash / Redis distributed locks with retry policy.
 
-#### Milestone 6C: Analytics Sync & PDF Generation (Upcoming)
-- YouTube Analytics & Instagram Insights sync into MetricSnapshot.
-- Configurable Gemini model integration for SEO.
-- Server-side PDF export via `@react-pdf/renderer`.
+#### Milestone 6C: Integration Hardening, Real Analytics Ingestion, AI SEO & Server PDF Reporting (Active)
+- **Stage 0 (Mandatory Integration Corrections):**
+  - Task 28: Schema extensions (`OAuthState.mode`, `PostTarget.remoteContainerId` & `leaseOwner`, `Account` sync metadata, `MetricSnapshot` provenance & deduplication constraint)
+  - Task 29: OAuth state `mode` binding (`mock` | `live`) and Channel UI Live OAuth authorization gating
+  - Task 30: SSRF-hardened YouTube media retrieval, post workspace ID enforcement on stored media, and 180s YouTube Shorts validation
+  - Task 31: Shared project-level YouTube quota bucket with `America/Los_Angeles` midnight reset and atomic conditional reservation
+  - Task 32: Ambiguous Instagram publish reconciliation (`remoteContainerId` + `platformPostId` persistence) and fenced worker leases (`leaseOwner` + `nextRetryAt`)
+  - Task 33: Authenticated `/api/media/upload` and `/api/media/presign` endpoints with real storage round-trip
+  - Task 34: Analytics workspace isolation (zero `workspace.findFirst()` calls) and strict separation of mock vs. live analytics provenance
+- **Stage 1 (Real Analytics Ingestion):**
+  - Task 35: Live YouTube Analytics & Instagram Insights ingestion, rate-limit/retry handling, incremental sync, and snapshot deduplication
+- **Stage 2 (AI Social SEO Assistant):**
+  - Task 36: Provider-independent AI SEO Assistant (`AI_MODEL` configurable, Gemini/OpenAI/Anthropic + free local Heuristic fallback, explicit provenance labels, no virality claims)
+- **Stage 3 (Server-Generated PDF Reporting):**
+  - Task 37: Server-side PDF 1.4 Report Generator (`ReportService`) and authorized `/api/reports/export` endpoint with source attribution, metric definitions, and unavailable-data markers
+- **Verification & CI:**
+  - Task 38: Comprehensive Phase 6C regression & integration test suite (`src/test-phase-6c.ts`) wired into `.github/workflows/ci.yml`
 
 ---
 

@@ -7,6 +7,7 @@ export interface OAuthStatePayload {
   workspaceId: string;
   userId: string;
   platform: SocialPlatform;
+  mode: "mock" | "live";
   timestamp: number;
   nonce: string;
 }
@@ -15,12 +16,14 @@ export interface CreatedOAuthState {
   stateToken: string;
   codeVerifier: string;
   codeChallenge: string;
+  mode: "mock" | "live";
 }
 
 export interface ConsumedOAuthState {
   workspaceId: string;
   userId: string;
   platform: SocialPlatform;
+  mode: "mock" | "live";
   codeVerifier: string | null;
 }
 
@@ -88,21 +91,24 @@ export function verifyOAuthStateSignature(stateString: string): OAuthStatePayloa
 
 /**
  * Creates a persistent, single-use, tamper-evident OAuth state with PKCE verifier.
- * Persists the nonce and PKCE code_verifier to database storage bound to the initiating session.
+ * Persists the nonce, provider mode ('mock' | 'live'), and PKCE code_verifier to database storage bound to the initiating session.
  */
 export async function createOAuthState(
   workspaceId: string,
   userId: string,
-  platform: SocialPlatform
+  platform: SocialPlatform,
+  mode: "mock" | "live" = "mock"
 ): Promise<CreatedOAuthState> {
   const secret = getAuthSecret();
   const { codeVerifier, codeChallenge } = generatePKCEPair();
   const now = Date.now();
+  const normalizedMode: "mock" | "live" = mode === "live" ? "live" : "mock";
 
   const payload: OAuthStatePayload = {
     workspaceId,
     userId,
     platform,
+    mode: normalizedMode,
     timestamp: now,
     nonce: crypto.randomBytes(16).toString("hex"),
   };
@@ -122,18 +128,19 @@ export async function createOAuthState(
       workspaceId,
       userId,
       platform,
+      mode: normalizedMode,
       codeVerifier,
       isConsumed: false,
       expiresAt,
     },
   });
 
-  return { stateToken, codeVerifier, codeChallenge };
+  return { stateToken, codeVerifier, codeChallenge, mode: normalizedMode };
 }
 
 /**
  * Atomically verifies and consumes a single-use OAuth state parameter.
- * Prevents state replay, CSRF, session fixation, and cross-tenant hijacking.
+ * Prevents state replay, CSRF, session fixation, mode tampering, and cross-tenant hijacking.
  */
 export async function consumeOAuthState(
   stateToken: string,
@@ -174,6 +181,12 @@ export async function consumeOAuthState(
     throw new OAuthStateError("OAuth session mismatch: Persistent state record belongs to another user.");
   }
 
+  const persistedMode: "mock" | "live" = record.mode === "live" ? "live" : "mock";
+  const signedMode: "mock" | "live" = decoded.mode === "live" ? "live" : "mock";
+  if (persistedMode !== signedMode) {
+    throw new OAuthStateError("OAuth state mode integrity mismatch between signed payload and database record.");
+  }
+
   // 3. Atomic single-use consumption
   const consumed = await db.oAuthState.updateMany({
     where: {
@@ -193,6 +206,7 @@ export async function consumeOAuthState(
     workspaceId: record.workspaceId,
     userId: record.userId,
     platform: record.platform as SocialPlatform,
+    mode: persistedMode,
     codeVerifier: record.codeVerifier,
   };
 }

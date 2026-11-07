@@ -1,5 +1,10 @@
 import { db } from "@/lib/db";
-import { StorageService, verifyFileSignature } from "@/services/storage.service";
+import {
+  StorageService,
+  StorageSecurityError,
+  verifyFileSignature,
+  fetchSafeRemoteMedia,
+} from "@/services/storage.service";
 import {
   ISocialProvider,
   SocialPlatform,
@@ -16,7 +21,8 @@ import {
 
 /**
  * Persistent database-backed quota tracker for YouTube Data API v3 daily video.insert calls.
- * Enforces Google's default 100 videos.insert calls per day limit across process restarts.
+ * Enforces Google's default 100 videos.insert calls per Google Cloud project per day,
+ * resetting at midnight Pacific Time (America/Los_Angeles) with atomic conditional reservations.
  */
 export class YouTubeQuotaManager {
   public static getDailyLimit(): number {
@@ -24,75 +30,128 @@ export class YouTubeQuotaManager {
     return Number.isFinite(configured) && configured > 0 ? configured : 100;
   }
 
+  /**
+   * Resolves the shared Google Cloud project quota bucket ID.
+   * Google allocates the 100 videos.insert daily limit per Cloud Project, not per individual channel.
+   */
+  public static getProjectQuotaEntityId(overrideProjectId?: string): string {
+    return (
+      process.env.YOUTUBE_QUOTA_PROJECT_ID ||
+      overrideProjectId ||
+      process.env.YOUTUBE_CLIENT_ID ||
+      "google_cloud_default_project"
+    );
+  }
+
+  /**
+   * Formats a timestamp into YYYY-MM-DD in America/Los_Angeles (Pacific Time),
+   * matching Google Cloud's midnight PT quota reset boundary.
+   */
+  public static getPacificDateString(at: Date = new Date()): string {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(at);
+  }
+
+  /**
+   * Atomically checks and reserves 1 videos.insert call from the shared project quota bucket.
+   * Uses conditional updateMany (usedCount < limitCount) so concurrent callers never increment past limitCount.
+   */
   static async checkAndReserveUploadQuota(
-    entityId: string
-  ): Promise<{ allowed: boolean; remaining: number; used: number }> {
-    const today = new Date().toISOString().slice(0, 10);
+    overrideProjectId?: string,
+    now: Date = new Date()
+  ): Promise<{
+    allowed: boolean;
+    remaining: number;
+    used: number;
+    entityId: string;
+    date: string;
+  }> {
+    const entityId = this.getProjectQuotaEntityId(overrideProjectId);
+    const pacificDate = this.getPacificDateString(now);
     const limitCount = this.getDailyLimit();
 
-    const existing = await db.platformQuota.findUnique({
-      where: {
-        platform_entityId_date: {
+    // 1. Ensure the quota row exists for (YOUTUBE, entityId, pacificDate) without incrementing
+    await db.platformQuota
+      .upsert({
+        where: {
+          platform_entityId_date: {
+            platform: "YOUTUBE",
+            entityId,
+            date: pacificDate,
+          },
+        },
+        update: { limitCount },
+        create: {
           platform: "YOUTUBE",
           entityId,
-          date: today,
+          date: pacificDate,
+          usedCount: 0,
+          limitCount,
         },
-      },
-    });
+      })
+      .catch(() => {
+        // Ignore unique constraint race when concurrent workers initialize the same day's bucket
+      });
 
-    if (existing && existing.usedCount >= limitCount) {
-      return {
-        allowed: false,
-        remaining: 0,
-        used: existing.usedCount,
-      };
-    }
-
-    const updated = await db.platformQuota.upsert({
+    // 2. Conditional atomic reservation: only increments if usedCount < limitCount
+    const reserved = await db.platformQuota.updateMany({
       where: {
-        platform_entityId_date: {
-          platform: "YOUTUBE",
-          entityId,
-          date: today,
-        },
+        platform: "YOUTUBE",
+        entityId,
+        date: pacificDate,
+        usedCount: { lt: limitCount },
       },
-      update: {
+      data: {
         usedCount: { increment: 1 },
         limitCount,
       },
-      create: {
-        platform: "YOUTUBE",
-        entityId,
-        date: today,
-        usedCount: 1,
-        limitCount,
+    });
+
+    const current = await db.platformQuota.findUnique({
+      where: {
+        platform_entityId_date: {
+          platform: "YOUTUBE",
+          entityId,
+          date: pacificDate,
+        },
       },
     });
 
-    if (updated.usedCount > limitCount) {
+    const used = current ? current.usedCount : limitCount;
+
+    if (reserved.count === 0) {
       return {
         allowed: false,
         remaining: 0,
-        used: updated.usedCount,
+        used,
+        entityId,
+        date: pacificDate,
       };
     }
 
     return {
       allowed: true,
-      remaining: Math.max(0, limitCount - updated.usedCount),
-      used: updated.usedCount,
+      remaining: Math.max(0, limitCount - used),
+      used,
+      entityId,
+      date: pacificDate,
     };
   }
 
-  static async getRemainingQuota(entityId: string): Promise<number> {
-    const today = new Date().toISOString().slice(0, 10);
+  static async getRemainingQuota(overrideProjectId?: string, now: Date = new Date()): Promise<number> {
+    const entityId = this.getProjectQuotaEntityId(overrideProjectId);
+    const pacificDate = this.getPacificDateString(now);
     const limitCount = this.getDailyLimit();
     const existing = await db.platformQuota.findUnique({
       where: {
         platform_entityId_date: {
           platform: "YOUTUBE",
           entityId,
-          date: today,
+          date: pacificDate,
         },
       },
     });
@@ -260,11 +319,15 @@ export class YouTubeLiveProvider implements ISocialProvider {
 
   /**
    * Resolves the binary video buffer from the publish payload or storage service.
+   * Enforces SSRF protections on remote URLs and strictly enforces the post's authorized workspaceId
+   * when reading from storage (never trusting workspace segments inside a client-supplied URL).
    */
   private async resolveVideoBuffer(
+    account: ConnectedAccountData,
     payload: PostPublishPayload
   ): Promise<{ buffer: Buffer; mimeType: string }> {
     const mimeType = payload.mediaMimeType || "video/mp4";
+    const authorizedWorkspaceId = payload.workspaceId || account.workspaceId;
 
     if (payload.mediaBuffer && Buffer.isBuffer(payload.mediaBuffer)) {
       const sig = verifyFileSignature(payload.mediaBuffer, mimeType);
@@ -279,25 +342,15 @@ export class YouTubeLiveProvider implements ISocialProvider {
       throw new Error("YouTube publishing requires a video file (mediaUrls is empty and no mediaBuffer provided).");
     }
 
-    if (mediaUrl.startsWith("https://") || mediaUrl.startsWith("http://")) {
-      const mediaRes = await fetch(mediaUrl);
-      if (!mediaRes.ok) {
-        throw new Error(`Failed to download video media from ${mediaUrl} (HTTP ${mediaRes.status})`);
-      }
-      const arrayBuf = await mediaRes.arrayBuffer();
-      const buffer = Buffer.from(arrayBuf);
-      const detectedMime = mediaRes.headers.get("content-type") || mimeType;
-      const sig = verifyFileSignature(buffer, detectedMime);
-      if (!sig.valid) {
-        throw new Error(`Downloaded media failed signature check: ${sig.reason}`);
-      }
-      return { buffer, mimeType: detectedMime };
-    }
-
     if (mediaUrl.startsWith("/uploads/")) {
+      if (!authorizedWorkspaceId) {
+        throw new StorageSecurityError(
+          "Cannot resolve stored media without an authenticated post workspaceId."
+        );
+      }
       const storageKey = mediaUrl.replace(/^\/uploads\//, "");
-      const workspaceSegment = storageKey.split("/")[0];
-      const buffer = await StorageService.getProvider().read(storageKey, workspaceSegment);
+      // Enforce the post's actual workspaceId — never derive authorization from the URL's path segment
+      const buffer = await StorageService.getProvider().read(storageKey, authorizedWorkspaceId);
       const sig = verifyFileSignature(buffer, mimeType);
       if (!sig.valid) {
         throw new Error(`Stored video failed signature check: ${sig.reason}`);
@@ -305,7 +358,19 @@ export class YouTubeLiveProvider implements ISocialProvider {
       return { buffer, mimeType };
     }
 
-    throw new Error(`Unsupported video media source URL for YouTube upload: ${mediaUrl}`);
+    if (mediaUrl.startsWith("https://") || mediaUrl.startsWith("http://")) {
+      const { buffer, contentType } = await fetchSafeRemoteMedia(mediaUrl, {
+        authorizedWorkspaceId,
+      });
+      const detectedMime = contentType || mimeType;
+      const sig = verifyFileSignature(buffer, detectedMime);
+      if (!sig.valid) {
+        throw new Error(`Downloaded media failed signature check: ${sig.reason}`);
+      }
+      return { buffer, mimeType: detectedMime };
+    }
+
+    throw new StorageSecurityError(`Unsupported or unsafe video media source URL for YouTube upload: ${mediaUrl}`);
   }
 
   /**
@@ -445,7 +510,7 @@ export class YouTubeLiveProvider implements ISocialProvider {
     }
 
     // 1. Resolve & validate actual binary video content before consuming quota
-    const { buffer: videoBuffer, mimeType } = await this.resolveVideoBuffer(payload);
+    const { buffer: videoBuffer, mimeType } = await this.resolveVideoBuffer(account, payload);
     const totalBytes = videoBuffer.length;
 
     const title = (payload.videoTitle || payload.content.slice(0, 70) || "Untitled Video").trim();
@@ -483,13 +548,11 @@ export class YouTubeLiveProvider implements ISocialProvider {
       }
       startOffset = recovery.nextByteOffset;
     } else {
-      // 3. Enforce persistent daily videos.insert quota before initiating a new session
-      const quota = await YouTubeQuotaManager.checkAndReserveUploadQuota(
-        account.platformAccountId
-      );
+      // 3. Enforce persistent daily videos.insert project quota before initiating a new session
+      const quota = await YouTubeQuotaManager.checkAndReserveUploadQuota();
       if (!quota.allowed) {
         throw new Error(
-          `YouTube daily video upload quota exceeded (${YouTubeQuotaManager.getDailyLimit()} videos.insert calls/day limit reached for ${account.platformAccountId}).`
+          `YouTube daily video upload quota exceeded (${YouTubeQuotaManager.getDailyLimit()} videos.insert calls/day limit reached for project ${quota.entityId} on ${quota.date} PT).`
         );
       }
 
@@ -573,8 +636,8 @@ export class YouTubeLiveProvider implements ISocialProvider {
   }
 
   /**
-   * Live analytics boundary: Queries real YouTube Analytics API v2 reports if configured;
-   * never returns fabricated metrics disguised as live data.
+   * Live analytics ingestion: Queries real YouTube Analytics API v2 reports and channel statistics.
+   * Respects reporting delays (48h) and never fabricates unavailable metrics (e.g. unique reach or link clicks).
    */
   async fetchInsights(account: ConnectedAccountData, timeRange: TimeRange): Promise<SocialInsights> {
     this.getCredentials();
@@ -593,43 +656,90 @@ export class YouTubeLiveProvider implements ISocialProvider {
     url.searchParams.set("ids", "channel==MINE");
     url.searchParams.set("startDate", startDate);
     url.searchParams.set("endDate", endDate);
-    url.searchParams.set("metrics", "views,likes,comments,shares,subscribersGained");
+    url.searchParams.set(
+      "metrics",
+      "views,likes,comments,shares,subscribersGained,subscribersLost"
+    );
     url.searchParams.set("dimensions", "day");
     url.searchParams.set("sort", "day");
 
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${account.accessToken}` },
-    });
+    let res: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${account.accessToken}` },
+      });
+      if (res.status === 429 || res.status === 503 || res.status === 502) {
+        if (attempt < 3) {
+          const retryAfter = parseInt(res.headers.get("retry-after") || "0", 10);
+          const delayMs = retryAfter > 0 ? Math.min(retryAfter * 1000, 2000) : attempt * 200;
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+      }
+      break;
+    }
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`YouTube Analytics API request failed (${res.status}): ${errText}`);
+    if (!res || !res.ok) {
+      const errText = res ? await res.text() : "No response";
+      throw new Error(`YouTube Analytics API request failed (${res?.status || 500}): ${errText}`);
     }
 
     const data = await res.json();
-    const rows: Array<[string, number, number, number, number, number]> = data.rows || [];
+    const rows: Array<[string, number, number, number, number, number, number?]> = data.rows || [];
+
+    // Optionally fetch current channel subscriberCount if available
+    let currentSubscribers = 0;
+    try {
+      const chanRes = await fetch(
+        "https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true",
+        { headers: { Authorization: `Bearer ${account.accessToken}` } }
+      );
+      if (chanRes.ok) {
+        const chanData = await chanRes.json();
+        const subStr = chanData.items?.[0]?.statistics?.subscriberCount;
+        if (subStr !== undefined) {
+          currentSubscribers = parseInt(String(subStr), 10) || 0;
+        }
+      }
+    } catch {
+      // Non-fatal if channel statistics call is skipped in restricted scopes
+    }
 
     let totalViews = 0;
     let totalEngagements = 0;
     let followerGrowth = 0;
 
+    const availableMetrics = [
+      "impressions",
+      "videoViews",
+      "engagements",
+      "likes",
+      "comments",
+      "shares",
+      "followerGrowth",
+    ];
+
     const dailyMetrics = rows.map((row) => {
-      const [date, views, likes, comments, shares, subsGained] = row;
+      const [date, views, likes, comments, shares, subsGained, subsLost] = row;
       const engagements = (likes || 0) + (comments || 0) + (shares || 0);
+      const netSubs = (subsGained || 0) - (subsLost || 0);
       totalViews += views || 0;
       totalEngagements += engagements;
-      followerGrowth += subsGained || 0;
+      followerGrowth += netSubs;
 
       return {
         date: String(date),
         impressions: views || 0,
-        reach: views || 0,
+        reach: 0, // YouTube Analytics daily channel report does not expose unique viewer reach per day
         engagements,
         likes: likes || 0,
         comments: comments || 0,
         shares: shares || 0,
-        clicks: 0,
+        clicks: 0, // External link clicks not provided in standard daily report
         videoViews: views || 0,
+        followers: currentSubscribers,
+        followerGrowth: netSubs,
+        availableMetrics,
       };
     });
 
@@ -638,10 +748,14 @@ export class YouTubeLiveProvider implements ISocialProvider {
 
     return {
       platform: "YOUTUBE",
+      source: "LIVE_YOUTUBE_ANALYTICS",
+      syncedAt: new Date(),
+      unavailableMetrics: ["reach", "clicks", "audienceHeatmap"],
+      reportingDelayHours: 48,
       totalImpressions: totalViews,
-      totalReach: totalViews,
+      totalReach: 0, // Explicitly 0 & listed in unavailableMetrics — never conflated with views
       totalEngagements,
-      totalFollowers: 0,
+      totalFollowers: currentSubscribers,
       followerGrowth,
       engagementRate,
       dailyMetrics,

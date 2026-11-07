@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSocialProvider, SocialPlatform } from "@/providers";
+import { getSocialProvider, getLiveIntegrationStatus, SocialPlatform } from "@/providers";
 import {
   authenticateRequest,
   authorizeWorkspaceAccess,
@@ -38,8 +38,13 @@ export async function GET(request: NextRequest) {
 
     // Zero-token leak: sanitize all returned account records
     const safeAccounts = accounts.map(sanitizeAccount);
+    const liveIntegration = getLiveIntegrationStatus();
 
-    return NextResponse.json({ success: true, accounts: safeAccounts });
+    return NextResponse.json({
+      success: true,
+      accounts: safeAccounts,
+      liveIntegration,
+    });
   } catch (error) {
     return handleAuthApiError(error);
   }

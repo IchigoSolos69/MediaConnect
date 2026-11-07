@@ -20,6 +20,7 @@ export class LiveAnalyticsNotSupportedError extends Error {
 
 export interface ConnectedAccountData {
   id: string;
+  workspaceId?: string;
   platform: SocialPlatform;
   platformAccountId: string;
   username: string;
@@ -32,6 +33,7 @@ export interface ConnectedAccountData {
 export interface PostPublishPayload {
   postId: string;
   targetId: string;
+  workspaceId?: string;
   content: string;
   customContent?: string | null;
   mediaUrls: string[];
@@ -42,6 +44,8 @@ export interface PostPublishPayload {
   mediaBuffer?: Buffer | null;
   mediaMimeType?: string | null;
   resumableSessionUri?: string | null;
+  remoteContainerId?: string | null;
+  existingPlatformPostId?: string | null;
 }
 
 export interface PublishResult {
@@ -51,6 +55,7 @@ export interface PublishResult {
   publishedAt: Date;
   error?: string;
   resumableSessionUri?: string;
+  remoteContainerId?: string;
 }
 
 export interface AuthTokenResult {
@@ -79,15 +84,22 @@ export interface DailyMetric {
   shares: number;
   clicks: number;
   videoViews?: number;
+  followers?: number;
+  followerGrowth?: number;
+  availableMetrics?: string[];
 }
 
 export interface SocialInsights {
   platform: SocialPlatform;
+  source?: "LIVE_YOUTUBE_ANALYTICS" | "LIVE_INSTAGRAM_INSIGHTS" | "MOCK_SANDBOX";
+  syncedAt?: Date;
+  unavailableMetrics?: string[];
+  reportingDelayHours?: number;
   totalImpressions: number;
   totalReach: number;
   totalEngagements: number;
   totalFollowers: number;
-  followerGrowth: number;
+  followerGrowth: number | null;
   engagementRate: number;
   dailyMetrics: DailyMetric[];
 }

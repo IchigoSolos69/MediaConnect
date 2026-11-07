@@ -66,6 +66,9 @@ const PLATFORM_CONFIGS = [
 
 export default function ChannelsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [liveIntegration, setLiveIntegration] = useState<
+    Record<string, { enabled: boolean; reason?: string }>
+  >({});
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
@@ -76,6 +79,9 @@ export default function ChannelsPage() {
       const data = await res.json();
       if (data.success) {
         setAccounts(data.accounts);
+        if (data.liveIntegration) {
+          setLiveIntegration(data.liveIntegration);
+        }
       }
     } catch (err) {
       console.error("Failed to load accounts", err);
@@ -265,13 +271,28 @@ export default function ChannelsPage() {
                         <span>{isConnecting ? "Connecting..." : "1-Click Mock Connect (Free)"}</span>
                       </button>
 
-                      <a
-                        href={`/api/auth/connect/${cfg.platform.toLowerCase()}`}
-                        className="w-full flex items-center justify-center gap-1.5 bg-slate-800/80 hover:bg-slate-800 text-slate-300 text-[11px] font-medium py-1.5 rounded-lg border border-slate-700/80 transition"
-                      >
-                        <span>Initiate Live OAuth 2.0</span>
-                        <ExternalLink className="w-3 h-3 text-slate-400" />
-                      </a>
+                      {liveIntegration[cfg.platform]?.enabled ? (
+                        <a
+                          href={`/api/auth/connect/${cfg.platform.toLowerCase()}?mode=live`}
+                          className="w-full flex items-center justify-center gap-1.5 bg-slate-800/80 hover:bg-slate-800 text-slate-300 text-[11px] font-medium py-1.5 rounded-lg border border-slate-700/80 transition"
+                        >
+                          <span>Initiate Live OAuth 2.0</span>
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          title={
+                            liveIntegration[cfg.platform]?.reason ||
+                            "Server-side live OAuth integration is not configured."
+                          }
+                          className="w-full flex items-center justify-center gap-1.5 bg-slate-900/60 text-slate-500 text-[11px] font-medium py-1.5 rounded-lg border border-slate-800/80 cursor-not-allowed opacity-70"
+                        >
+                          <span>Initiate Live OAuth 2.0 (Disabled)</span>
+                          <ExternalLink className="w-3 h-3 text-slate-600" />
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

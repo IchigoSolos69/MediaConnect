@@ -14,7 +14,7 @@ async function verifyPhase5() {
   console.log(`   - Total Reach: ${overview.totalReach.toLocaleString()}`);
   console.log(`   - Total Engagements: ${overview.totalEngagements.toLocaleString()}`);
   console.log(`   - Overall Engagement Rate: ${overview.engagementRate}%`);
-  console.log(`   - Follower Growth: +${overview.followerGrowth.toLocaleString()}`);
+  console.log(`   - Follower Growth: +${(overview.followerGrowth ?? 0).toLocaleString()}`);
   console.log(`   - Timeline points: ${overview.dailyTimeline.length} days recorded`);
 
   if (overview.totalImpressions <= 0) {
@@ -23,7 +23,7 @@ async function verifyPhase5() {
 
   // 2. Test Metricool 24x7 Audience Heatmap
   console.log("\n2. Metricool 24x7 Audience Heatmap:");
-  const heatmap = await AnalyticsService.getAudienceHeatmap("ALL");
+  const heatmap = await AnalyticsService.getAudienceHeatmap(workspace.id, "ALL");
   console.log(`   - Heatmap Cells count: ${heatmap.cells.length} (must be 168)`);
   console.log(`   - Top 3 Recommended Peak Hours:`);
   for (const slot of heatmap.bestSlots) {

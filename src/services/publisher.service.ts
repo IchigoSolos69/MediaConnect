@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { db } from "@/lib/db";
 import { getSocialProvider } from "@/providers";
 import { TokenVault } from "@/lib/crypto/vault";
@@ -19,14 +20,76 @@ export class CrossTenantPublishError extends Error {
   }
 }
 
+export class LeaseFencingError extends Error {
+  constructor(message = "Worker lease fencing violation: Lease was superseded by another worker.") {
+    super(message);
+    this.name = "LeaseFencingError";
+    Object.setPrototypeOf(this, LeaseFencingError.prototype);
+  }
+}
+
 export class PublisherService {
   /**
-   * Publishes a single post target with conditional lease claiming, expired lease recovery, and bounded retries.
+   * Renews an active target lease if and only if the caller still owns the fencing token (leaseOwner).
    */
-  static async publishTarget(targetId: string) {
+  static async renewTargetLease(
+    targetId: string,
+    leaseOwner: string,
+    leaseDurationMs = 5 * 60 * 1000
+  ): Promise<boolean> {
+    const newExpiry = new Date(Date.now() + leaseDurationMs);
+    const updated = await db.postTarget.updateMany({
+      where: {
+        id: targetId,
+        status: "PUBLISHING",
+        leaseOwner,
+      },
+      data: {
+        leaseExpiresAt: newExpiry,
+      },
+    });
+    return updated.count === 1;
+  }
+
+  /**
+   * Commits a target state update fenced by `leaseOwner` so a stale worker whose lease expired
+   * can never overwrite state written by a newer lease holder.
+   */
+  static async fencedUpdateTarget(
+    targetId: string,
+    leaseOwner: string,
+    data: Record<string, unknown>
+  ) {
+    const updated = await db.postTarget.updateMany({
+      where: {
+        id: targetId,
+        leaseOwner,
+      },
+      data,
+    });
+
+    if (updated.count === 0) {
+      throw new LeaseFencingError(
+        `Target ${targetId} lease owner '${leaseOwner}' was superseded; refusing to overwrite target state.`
+      );
+    }
+
+    const current = await db.postTarget.findUnique({ where: { id: targetId } });
+    return current!;
+  }
+
+  /**
+   * Publishes a single post target with conditional lease claiming, lease fencing (leaseOwner),
+   * nextRetryAt backoff enforcement, expired lease recovery, and bounded retries.
+   */
+  static async publishTarget(
+    targetId: string,
+    options?: { leaseDurationMs?: number; workerId?: string }
+  ) {
     const now = new Date();
-    const leaseDurationMs = 5 * 60 * 1000; // 5 minute execution lease
+    const leaseDurationMs = options?.leaseDurationMs ?? 5 * 60 * 1000; // 5 minute execution lease
     const leaseExpires = new Date(now.getTime() + leaseDurationMs);
+    const leaseOwner = options?.workerId || `worker_${crypto.randomUUID()}`;
 
     const existingTarget = await db.postTarget.findUnique({
       where: { id: targetId },
@@ -39,27 +102,42 @@ export class PublisherService {
       return existingTarget;
     }
 
-    // Bounded retries check: If target exceeded max retries, mark failed and halt
+    // Bounded retries check: If target exceeded max retries, halt
     if (existingTarget.retryCount >= existingTarget.maxRetries) {
       return existingTarget;
     }
 
-    // 1. CONDITIONAL ATOMIC CLAIM AT TARGET LEVEL
+    // Enforce nextRetryAt backoff window before claiming
+    if (
+      existingTarget.nextRetryAt &&
+      existingTarget.nextRetryAt.getTime() > now.getTime()
+    ) {
+      return existingTarget;
+    }
+
+    // 1. CONDITIONAL ATOMIC CLAIM AT TARGET LEVEL WITH LEASE OWNER FENCING
     // Includes:
-    // a) PENDING or FAILED targets without active lease (or expired lease)
+    // a) PENDING or FAILED targets without active lease (or expired lease) whose nextRetryAt <= now
     // b) PUBLISHING targets whose lease expired (Crashed Worker / Timeout Recovery!)
     const claim = await db.postTarget.updateMany({
       where: {
         id: targetId,
         retryCount: { lt: existingTarget.maxRetries },
-        OR: [
+        AND: [
           {
-            status: { in: ["PENDING", "FAILED"] },
-            OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
+            OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }],
           },
           {
-            status: "PUBLISHING",
-            leaseExpiresAt: { lte: now }, // Expired lease recovery
+            OR: [
+              {
+                status: { in: ["PENDING", "FAILED"] },
+                OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
+              },
+              {
+                status: "PUBLISHING",
+                leaseExpiresAt: { lte: now }, // Expired lease recovery
+              },
+            ],
           },
         ],
       },
@@ -67,11 +145,12 @@ export class PublisherService {
         status: "PUBLISHING",
         claimedAt: now,
         leaseExpiresAt: leaseExpires,
+        leaseOwner,
       },
     });
 
     if (claim.count === 0) {
-      // Already claimed by an active concurrent worker or completed
+      // Already claimed by an active concurrent worker, awaiting nextRetryAt, or completed
       return existingTarget;
     }
 
@@ -83,7 +162,9 @@ export class PublisherService {
       },
     });
 
-    if (!target) throw new Error(`Target ${targetId} not found after claim`);
+    if (!target || target.leaseOwner !== leaseOwner) {
+      return existingTarget;
+    }
 
     // 2. Verify workspace tenant integrity inside publishing engine
     if (target.account.workspaceId !== target.post.workspaceId) {
@@ -96,13 +177,11 @@ export class PublisherService {
           accountWorkspaceId: target.account.workspaceId,
         },
       });
-      return await db.postTarget.update({
-        where: { id: targetId },
-        data: {
-          status: "FAILED",
-          errorMessage: "Security violation: Account belongs to another workspace.",
-          leaseExpiresAt: null,
-        },
+      return await this.fencedUpdateTarget(targetId, leaseOwner, {
+        status: "FAILED",
+        errorMessage: "Security violation: Account belongs to another workspace.",
+        leaseExpiresAt: null,
+        leaseOwner: null,
       });
     }
 
@@ -110,8 +189,8 @@ export class PublisherService {
     const idempotencyKey =
       target.idempotencyKey || `pub_${target.id}_${target.createdAt.getTime()}`;
 
-    await db.postTarget.update({
-      where: { id: targetId },
+    await db.postTarget.updateMany({
+      where: { id: targetId, leaseOwner },
       data: { idempotencyKey },
     });
 
@@ -127,6 +206,7 @@ export class PublisherService {
     const payload = {
       postId: target.postId,
       targetId: target.id,
+      workspaceId: target.post.workspaceId,
       content: target.customContent || target.post.content,
       customContent: target.customContent,
       mediaUrls,
@@ -135,6 +215,8 @@ export class PublisherService {
       videoTags: target.videoTags,
       idempotencyKey,
       resumableSessionUri: target.resumableSessionUri,
+      remoteContainerId: target.remoteContainerId,
+      existingPlatformPostId: target.platformPostId,
     };
 
     // 4. Safely decrypt token just-in-time from vault envelope
@@ -157,15 +239,13 @@ export class PublisherService {
       });
       const nextRetry = target.retryCount + 1;
       const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
-      return await db.postTarget.update({
-        where: { id: targetId },
-        data: {
-          status: "FAILED",
-          errorMessage: `Decryption error: ${error.message}`,
-          retryCount: nextRetry,
-          nextRetryAt: new Date(Date.now() + backoffMs),
-          leaseExpiresAt: null,
-        },
+      return await this.fencedUpdateTarget(targetId, leaseOwner, {
+        status: "FAILED",
+        errorMessage: `Decryption error: ${error.message}`,
+        retryCount: nextRetry,
+        nextRetryAt: new Date(Date.now() + backoffMs),
+        leaseExpiresAt: null,
+        leaseOwner: null,
       });
     }
 
@@ -240,17 +320,15 @@ export class PublisherService {
         const nextRetry = target.retryCount + 1;
         const exceeded = nextRetry >= target.maxRetries;
         const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
-        return await db.postTarget.update({
-          where: { id: targetId },
-          data: {
-            status: "FAILED",
-            errorMessage: exceeded
-              ? `Maximum retries (${target.maxRetries}) exceeded: ${rErr.message}`
-              : rErr.message,
-            retryCount: nextRetry,
-            nextRetryAt: new Date(Date.now() + backoffMs),
-            leaseExpiresAt: null,
-          },
+        return await this.fencedUpdateTarget(targetId, leaseOwner, {
+          status: "FAILED",
+          errorMessage: exceeded
+            ? `Maximum retries (${target.maxRetries}) exceeded: ${rErr.message}`
+            : rErr.message,
+          retryCount: nextRetry,
+          nextRetryAt: new Date(Date.now() + backoffMs),
+          leaseExpiresAt: null,
+          leaseOwner: null,
         });
       }
     }
@@ -261,6 +339,7 @@ export class PublisherService {
         result = await provider.publishPost(
           {
             id: target.account.id,
+            workspaceId: target.post.workspaceId,
             platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
             platformAccountId: target.account.platformAccountId,
             username: target.account.username,
@@ -283,6 +362,7 @@ export class PublisherService {
           result = await provider.publishPost(
             {
               id: target.account.id,
+              workspaceId: target.post.workspaceId,
               platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
               platformAccountId: target.account.platformAccountId,
               username: target.account.username,
@@ -299,18 +379,17 @@ export class PublisherService {
       }
 
       if (result.success) {
-        const updated = await db.postTarget.update({
-          where: { id: targetId },
-          data: {
-            status: "PUBLISHED",
-            platformPostId: result.platformPostId,
-            liveUrl: result.liveUrl,
-            resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
-            publishedAt: result.publishedAt || new Date(),
-            leaseExpiresAt: null, // Clear lease
-            nextRetryAt: null,
-            errorMessage: null,
-          },
+        const updated = await this.fencedUpdateTarget(targetId, leaseOwner, {
+          status: "PUBLISHED",
+          platformPostId: result.platformPostId,
+          liveUrl: result.liveUrl,
+          resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
+          remoteContainerId: result.remoteContainerId || target.remoteContainerId,
+          publishedAt: result.publishedAt || new Date(),
+          leaseExpiresAt: null, // Clear lease
+          leaseOwner: null,
+          nextRetryAt: null,
+          errorMessage: null,
         });
 
         // Increment account postsCount
@@ -324,37 +403,44 @@ export class PublisherService {
         const nextRetry = target.retryCount + 1;
         const exceeded = nextRetry >= target.maxRetries;
         const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
-        return await db.postTarget.update({
-          where: { id: targetId },
-          data: {
-            status: "FAILED",
-            errorMessage: exceeded
-              ? `Maximum retries (${target.maxRetries}) exceeded: ${result.error || "Publishing failed"}`
-              : (result.error || "Publishing failed"),
-            resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
-            retryCount: nextRetry,
-            nextRetryAt: new Date(Date.now() + backoffMs),
-            leaseExpiresAt: null, // Release lease so retry is possible
-          },
+        return await this.fencedUpdateTarget(targetId, leaseOwner, {
+          status: "FAILED",
+          errorMessage: exceeded
+            ? `Maximum retries (${target.maxRetries}) exceeded: ${result.error || "Publishing failed"}`
+            : (result.error || "Publishing failed"),
+          resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
+          remoteContainerId: result.remoteContainerId || target.remoteContainerId,
+          platformPostId: result.platformPostId || target.platformPostId,
+          retryCount: nextRetry,
+          nextRetryAt: new Date(Date.now() + backoffMs),
+          leaseExpiresAt: null, // Release lease so retry is possible
+          leaseOwner: null,
         });
       }
     } catch (publishErr: unknown) {
-      const pErr = publishErr as Error & { resumableSessionUri?: string };
+      if (publishErr instanceof LeaseFencingError) {
+        throw publishErr;
+      }
+      const pErr = publishErr as Error & {
+        resumableSessionUri?: string;
+        remoteContainerId?: string;
+        platformPostId?: string;
+      };
       const nextRetry = target.retryCount + 1;
       const exceeded = nextRetry >= target.maxRetries;
       const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
-      return await db.postTarget.update({
-        where: { id: targetId },
-        data: {
-          status: "FAILED",
-          errorMessage: exceeded
-            ? `Maximum retries (${target.maxRetries}) exceeded: ${pErr.message || "Provider runtime error"}`
-            : (pErr.message || "Provider runtime error"),
-          resumableSessionUri: pErr.resumableSessionUri || target.resumableSessionUri,
-          retryCount: nextRetry,
-          nextRetryAt: new Date(Date.now() + backoffMs),
-          leaseExpiresAt: null,
-        },
+      return await this.fencedUpdateTarget(targetId, leaseOwner, {
+        status: "FAILED",
+        errorMessage: exceeded
+          ? `Maximum retries (${target.maxRetries}) exceeded: ${pErr.message || "Provider runtime error"}`
+          : (pErr.message || "Provider runtime error"),
+        resumableSessionUri: pErr.resumableSessionUri || target.resumableSessionUri,
+        remoteContainerId: pErr.remoteContainerId || target.remoteContainerId,
+        platformPostId: pErr.platformPostId || target.platformPostId,
+        retryCount: nextRetry,
+        nextRetryAt: new Date(Date.now() + backoffMs),
+        leaseExpiresAt: null,
+        leaseOwner: null,
       });
     }
   }

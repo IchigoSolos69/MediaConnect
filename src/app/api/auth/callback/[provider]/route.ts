@@ -70,13 +70,34 @@ export async function GET(
       "channels:connect"
     );
 
-    const requestedMode = searchParams.get("mode");
-    const socialMode: "mock" | "live" =
-      requestedMode === "live" || requestedMode === "mock"
-        ? requestedMode
-        : ((process.env.NEXT_PUBLIC_SOCIAL_MODE as "mock" | "live") || "mock");
+    // 5. Enforce provider mode bound to OAuth state — NEVER trust callback query parameters to select mode
+    const callbackModeParam = searchParams.get("mode");
+    if (
+      callbackModeParam &&
+      (callbackModeParam === "mock" || callbackModeParam === "live") &&
+      callbackModeParam !== consumedState.mode
+    ) {
+      auditSecurityEvent({
+        event: "OAUTH_CSRF_REJECTED",
+        userId: session.userId,
+        workspaceId: membership.workspaceId,
+        details: {
+          provider: normalizedPlatform,
+          reason: `OAuth callback mode tampering rejected: query mode '${callbackModeParam}' conflicts with state mode '${consumedState.mode}'`,
+        },
+      });
+      return NextResponse.json(
+        {
+          success: false,
+          error: `OAuth mode tampering detected: callback query parameter mode='${callbackModeParam}' conflicts with state-bound mode='${consumedState.mode}'.`,
+        },
+        { status: 400 }
+      );
+    }
 
-    // 5. Exchange code (and PKCE code_verifier) for credentials via social provider adapter
+    const socialMode: "mock" | "live" = consumedState.mode;
+
+    // 6. Exchange code (and PKCE code_verifier) for credentials via social provider adapter
     const providerInstance = getSocialProvider(normalizedPlatform, socialMode);
     const authResult = await providerInstance.exchangeCode(
       code,

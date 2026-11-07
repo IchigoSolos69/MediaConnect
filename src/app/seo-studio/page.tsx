@@ -29,6 +29,8 @@ const SAMPLE_POSTS = [
 
 export default function SeoStudioPage() {
   const [content, setContent] = useState<string>(SAMPLE_POSTS[0].text);
+  const [assistantResult, setAssistantResult] = useState<any>(null);
+  const [assistantLoading, setAssistantLoading] = useState<boolean>(false);
 
   // Compute live SEO analysis on every keystroke
   const analysis = useMemo(() => {
@@ -37,6 +39,25 @@ export default function SeoStudioPage() {
 
   const handleAppendTags = (tags: string) => {
     setContent((prev) => `${prev.trim()}\n\n${tags}`);
+  };
+
+  const handleGenerateAssistant = async () => {
+    try {
+      setAssistantLoading(true);
+      const res = await fetch("/api/seo/assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, topic: "marketing" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAssistantResult(data.assistant);
+      }
+    } catch (err) {
+      console.error("Failed to generate SEO suggestions", err);
+    } finally {
+      setAssistantLoading(false);
+    }
   };
 
   return (
@@ -58,6 +79,17 @@ export default function SeoStudioPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleGenerateAssistant}
+              disabled={assistantLoading}
+              className="flex items-center gap-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold px-4 py-2.5 rounded-xl border border-purple-500/40 transition"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>
+                {assistantLoading ? "Generating..." : "Run AI / Heuristic Assistant"}
+              </span>
+            </button>
             <Link
               href="/planner"
               className="flex items-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white text-xs font-semibold px-5 py-2.5 rounded-xl shadow-lg shadow-indigo-500/25 transition active:scale-95"
@@ -141,6 +173,45 @@ export default function SeoStudioPage() {
               scores={analysis.scores}
               recommendations={analysis.recommendations}
             />
+
+            {/* AI / Heuristic Assistant Output Panel */}
+            {assistantResult && (
+              <div className="bg-slate-900/70 border border-slate-800 rounded-3xl p-6 space-y-4 shadow-xl">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-purple-400" />
+                    <h3 className="font-bold text-white text-sm">
+                      Social SEO Assistant Suggestions
+                    </h3>
+                  </div>
+                  <span className="text-[11px] font-mono font-semibold px-2.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                    {assistantResult.source} ({assistantResult.provider}: {assistantResult.model})
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-slate-400 bg-slate-950/70 border border-slate-800 rounded-xl p-3">
+                  {assistantResult.disclaimer}
+                </p>
+
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-slate-300 block">
+                    Hook Alternatives:
+                  </span>
+                  {assistantResult.hookAlternatives?.map((h: any, i: number) => (
+                    <div
+                      key={i}
+                      onClick={() => setContent(h.hook + "\n\n" + content)}
+                      className="p-3 bg-slate-950 border border-slate-800 hover:border-purple-500/40 rounded-xl text-xs text-slate-200 cursor-pointer transition"
+                    >
+                      <span className="text-[10px] font-mono text-purple-400 uppercase block mb-0.5">
+                        {h.style}
+                      </span>
+                      {h.hook}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Right Column: Visual Smartphone Simulator (5 Cols) */}

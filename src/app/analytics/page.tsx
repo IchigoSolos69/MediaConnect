@@ -11,10 +11,7 @@ import {
   TrendingUp,
   Share2,
   FileText,
-  Calendar,
-  Sparkles,
   RefreshCw,
-  ArrowUpRight,
 } from "lucide-react";
 import { YouTubeIcon, InstagramIcon, XIcon } from "@/components/icons";
 import { formatNumber } from "@/lib/utils";
@@ -25,6 +22,7 @@ export default function AnalyticsPage() {
   const [data, setData] = useState<any>(null);
   const [competitors, setCompetitors] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [isReportOpen, setIsReportOpen] = useState(false);
 
   const fetchAnalytics = useCallback(async () => {
@@ -53,6 +51,25 @@ export default function AnalyticsPage() {
     }
   }, [days, platform]);
 
+  const handleSyncAnalytics = async () => {
+    try {
+      setSyncing(true);
+      const res = await fetch("/api/analytics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setData(json);
+      }
+    } catch (err) {
+      console.error("Analytics sync error", err);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   useEffect(() => {
     fetchAnalytics();
   }, [fetchAnalytics]);
@@ -66,15 +83,25 @@ export default function AnalyticsPage() {
         {/* Banner Header */}
         <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 rounded-3xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex flex-wrap items-center gap-2 mb-1">
               <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                Metricool-Grade Insights
+                Source: {overview?.dataSource || "LOADING"}
               </span>
-              <span className="text-xs text-slate-400">Cross-channel data aggregation</span>
+              {overview?.lastSyncedAt ? (
+                <span className="text-xs font-mono text-slate-400">
+                  Last Synced: {new Date(overview.lastSyncedAt).toLocaleString()}
+                </span>
+              ) : (
+                <span className="text-xs font-mono text-amber-400">
+                  Not yet synchronized
+                </span>
+              )}
             </div>
-            <h2 className="text-2xl font-bold text-white">Performance & Intelligence Suite</h2>
+            <h2 className="text-2xl font-bold text-white">
+              {overview?.workspaceName || "Workspace"} Performance & Intelligence Suite
+            </h2>
             <p className="text-sm text-slate-400 mt-1 max-w-xl">
-              Real-time impressions, engagement rates, 24x7 audience heatmaps, and competitor benchmarking.
+              Tenant-isolated impressions, engagement rates, audience heatmaps, and competitor benchmarking with explicit source attribution.
             </p>
           </div>
 
@@ -95,6 +122,15 @@ export default function AnalyticsPage() {
                 </button>
               ))}
             </div>
+
+            <button
+              onClick={handleSyncAnalytics}
+              disabled={syncing || loading}
+              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-3.5 py-2.5 rounded-xl border border-slate-700 transition"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
+              <span>{syncing ? "Syncing..." : "Sync Insights"}</span>
+            </button>
 
             <button
               onClick={() => setIsReportOpen(true)}
@@ -120,12 +156,10 @@ export default function AnalyticsPage() {
                 <span className="text-2xl font-bold text-white tracking-tight">
                   {formatNumber(overview.totalImpressions)}
                 </span>
-                <span className="text-xs font-semibold text-emerald-400 flex items-center">
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                  +12.4%
-                </span>
               </div>
-              <span className="text-[11px] text-slate-500 block mt-1">Past {days} days total views</span>
+              <span className="text-[11px] text-slate-500 block mt-1">
+                {overview.startDate} to {overview.endDate} ({overview.dataSource})
+              </span>
             </div>
 
             <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 hover:border-slate-700 transition">
@@ -139,12 +173,12 @@ export default function AnalyticsPage() {
                 <span className="text-2xl font-bold text-white tracking-tight">
                   {formatNumber(overview.totalReach)}
                 </span>
-                <span className="text-xs font-semibold text-emerald-400 flex items-center">
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                  +9.1%
-                </span>
               </div>
-              <span className="text-[11px] text-slate-500 block mt-1">Distinct user accounts reached</span>
+              <span className="text-[11px] text-slate-500 block mt-1">
+                {overview.unavailableMetrics?.includes("YOUTUBE:reach")
+                  ? "Excludes YouTube (Reach not provided by YT API)"
+                  : "Distinct user accounts reached"}
+              </span>
             </div>
 
             <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 hover:border-slate-700 transition">
@@ -173,10 +207,19 @@ export default function AnalyticsPage() {
                 </div>
               </div>
               <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-white tracking-tight">
-                  +{formatNumber(overview.followerGrowth)}
-                </span>
-                <span className="text-xs text-slate-400">new followers</span>
+                {overview.followerGrowth !== null && overview.followerGrowth !== undefined ? (
+                  <>
+                    <span className="text-2xl font-bold text-white tracking-tight">
+                      {overview.followerGrowth >= 0 ? "+" : ""}
+                      {formatNumber(overview.followerGrowth)}
+                    </span>
+                    <span className="text-xs text-slate-400">net delta</span>
+                  </>
+                ) : (
+                  <span className="text-sm font-mono font-semibold text-amber-400">
+                    Unavailable (Insufficient snapshots)
+                  </span>
+                )}
               </div>
               <span className="text-[11px] text-slate-500 block mt-1">
                 Total base: {formatNumber(overview.totalFollowers)}
@@ -219,25 +262,44 @@ export default function AnalyticsPage() {
                       </div>
                     </div>
 
-                    <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                      {pData.engagementRate}% Eng
-                    </span>
+                    <div className="text-right">
+                      <span className="text-[10px] font-mono font-semibold text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 block">
+                        {pData.source}
+                      </span>
+                      {pData.engagementRate !== null && (
+                        <span className="text-[11px] font-mono font-bold text-emerald-400 mt-1 block">
+                          {pData.engagementRate}% Eng
+                        </span>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
+                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80">
                     <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/60">
                       <span className="text-[10px] text-slate-400 block">Impressions</span>
-                      <span className="text-sm font-bold text-white">
-                        {formatNumber(pData.impressions)}
+                      <span className="text-xs font-bold text-white font-mono">
+                        {pData.impressions !== null ? formatNumber(pData.impressions) : "UNAVAILABLE"}
+                      </span>
+                    </div>
+                    <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/60">
+                      <span className="text-[10px] text-slate-400 block">Reach</span>
+                      <span className="text-xs font-bold text-white font-mono">
+                        {pData.reach !== null ? formatNumber(pData.reach) : "UNAVAILABLE"}
                       </span>
                     </div>
                     <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/60">
                       <span className="text-[10px] text-slate-400 block">Engagements</span>
-                      <span className="text-sm font-bold text-white">
-                        {formatNumber(pData.engagements)}
+                      <span className="text-xs font-bold text-white font-mono">
+                        {pData.engagements !== null ? formatNumber(pData.engagements) : "UNAVAILABLE"}
                       </span>
                     </div>
                   </div>
+
+                  {pData.unavailableMetrics?.length > 0 && (
+                    <div className="text-[10px] text-amber-400/90 font-mono bg-amber-500/5 border border-amber-500/20 rounded-lg px-2.5 py-1.5">
+                      Unavailable metrics: {pData.unavailableMetrics.join(", ")}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -249,6 +311,10 @@ export default function AnalyticsPage() {
           <AudienceHeatmap
             cells={heatmap.cells}
             bestSlots={heatmap.bestSlots}
+            available={heatmap.available}
+            source={heatmap.source}
+            lastSyncedAt={heatmap.lastSyncedAt}
+            reason={heatmap.reason}
             selectedPlatform={platform}
             onPlatformChange={setPlatform}
           />
@@ -269,11 +335,18 @@ export default function AnalyticsPage() {
           <ReportView
             isOpen={isReportOpen}
             onClose={() => setIsReportOpen(false)}
-            brandName="Acme Media"
+            brandName={overview.workspaceName || "Workspace"}
+            days={days}
+            startDate={overview.startDate}
+            endDate={overview.endDate}
+            dataSource={overview.dataSource}
+            lastSyncedAt={overview.lastSyncedAt}
+            unavailableMetrics={overview.unavailableMetrics}
             totalImpressions={overview.totalImpressions}
             totalReach={overview.totalReach}
             totalEngagements={overview.totalEngagements}
             totalFollowers={overview.totalFollowers}
+            followerGrowth={overview.followerGrowth}
             engagementRate={overview.engagementRate}
             byPlatform={overview.byPlatform}
           />

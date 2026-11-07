@@ -1194,6 +1194,12 @@ async function runPhase6BTestSuite() {
       throw new Error("Attempt 1 did not persist resumableSessionUri and nextRetryAt on PostTarget!");
     }
 
+    // Advance nextRetryAt into the past to simulate backoff window elapsing before Attempt 2
+    await db.postTarget.update({
+      where: { id: targetId },
+      data: { nextRetryAt: new Date(Date.now() - 1000) },
+    });
+
     // Attempt 2: Reuses persisted resumableSessionUri without creating a second session!
     const secondTry = await PublisherService.publishTarget(targetId);
     if (secondTry.status !== "PUBLISHED" || secondTry.platformPostId !== "yt_persisted_session_video_888") {
@@ -1252,13 +1258,17 @@ async function runPhase6BTestSuite() {
 
     await expectAnalyticsBoundary(() => yt.fetchAudienceActivity({ ...liveAcc, platform: "YOUTUBE" }), "YouTube heatmap");
     await expectAnalyticsBoundary(
-      () => ig.fetchInsights(liveAcc, { startDate: new Date(), endDate: new Date() }),
-      "Instagram live insights"
+      () => ig.fetchInsights({ ...liveAcc, isMock: true }, { startDate: new Date(), endDate: new Date() }),
+      "Instagram live insights on mock account"
     );
-    await expectAnalyticsBoundary(() => ig.fetchAudienceActivity(liveAcc), "Instagram heatmap");
+    await expectAnalyticsBoundary(() => ig.fetchAudienceActivity({ ...liveAcc, isMock: true }), "Instagram heatmap on mock account");
     await expectAnalyticsBoundary(
       () => x.fetchInsights({ ...liveAcc, platform: "X" }, { startDate: new Date(), endDate: new Date() }),
       "X live insights"
+    );
+    await expectAnalyticsBoundary(
+      () => x.fetchAudienceActivity({ ...liveAcc, platform: "X" }),
+      "X live heatmap"
     );
 
     console.log("   ✓ Live providers strictly refuse to return synthetic metrics or heatmaps disguised as live insights");

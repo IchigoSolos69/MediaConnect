@@ -1,6 +1,9 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { DashboardShell } from "@/components/layout/DashboardShell";
 import { db } from "@/lib/db";
+import { verifySessionToken, SESSION_COOKIE_NAME } from "@/lib/auth/session";
+import { authorizeWorkspaceAccess } from "@/lib/auth/server";
 import {
   Users,
   Calendar,
@@ -17,17 +20,34 @@ import { formatNumber, formatDate } from "@/lib/utils";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const workspace = await db.workspace.findFirst({
-    include: {
-      accounts: true,
-      posts: {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+  const session = token ? await verifySessionToken(token) : null;
+
+  let workspace = null;
+  if (session?.userId && session?.activeWorkspaceId) {
+    try {
+      const membership = await authorizeWorkspaceAccess(
+        session.userId,
+        session.activeWorkspaceId,
+        "analytics:view"
+      );
+      workspace = await db.workspace.findUnique({
+        where: { id: membership.workspaceId },
         include: {
-          targets: true,
+          accounts: true,
+          posts: {
+            include: {
+              targets: true,
+            },
+            orderBy: { scheduledAt: "asc" },
+          },
         },
-        orderBy: { scheduledAt: "asc" },
-      },
-    },
-  });
+      });
+    } catch {
+      workspace = null;
+    }
+  }
 
   const accounts = workspace?.accounts || [];
   const posts = workspace?.posts || [];

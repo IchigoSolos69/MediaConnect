@@ -304,4 +304,109 @@
 - [x] All 12 critical & high findings resolved
 - [x] Test suite 100% green (12/12)
 - [x] Production build clean
-- [ ] Approval gate: User review before proceeding to Milestone 6B
+- [x] Approval gate: User review before proceeding to Milestone 6B
+
+---
+
+### Milestone 6B: Live OAuth, Storage & Publishing Protocol
+- [x] Persistent single-use OAuth state & PKCE S256
+- [x] Local & SigV4 S3/R2 storage provider with magic-byte verification
+- [x] YouTube resumable upload & Instagram container polling lifecycles
+- [x] Scheduled token expiry refresh & TokenVault re-encryption
+- [x] Verified in GitHub Actions CI (`1bad7cd`, Run `42376435412`)
+
+---
+
+### Milestone 6C: Final Integration Hardening, Real Analytics, AI SEO & Server Reporting
+
+#### Task 28: Phase 6C Prisma Schema & Seed Extensions
+- **Description:** Extend `OAuthState` with `mode`, `PostTarget` with `remoteContainerId` and `leaseOwner`, `Account` with `lastSyncedAt`/`syncStatus`/`syncError`/`audienceActivityJson`, and `MetricSnapshot` with `source`/`syncedAt`/`availableMetrics` and `@@unique([accountId, date])`.
+- **Acceptance criteria:**
+  - [x] `npx prisma db push` and `npx prisma db seed` succeed cleanly.
+- **Verification:** `npx prisma db push --force-reset && npx prisma db seed`
+- **Files:** `prisma/schema.prisma`, `prisma/seed.ts`
+- **Scope:** S
+
+#### Task 29: OAuth Mode State Binding & Channel UI Live Gating
+- **Description:** Bind `mode` (`mock` | `live`) inside `OAuthState` at initiation (`createOAuthState`) and enforce `consumedState.mode` in callback (ignoring/rejecting callback `mode` query tampering). Update `/api/accounts` and `/channels` UI so Live OAuth explicitly passes `mode=live` and is disabled unless server-side live credentials are configured.
+- **Acceptance criteria:**
+  - [x] Callback ignores/rejects tampered `?mode=` query strings and uses persisted `consumedState.mode`.
+  - [x] `/channels` UI links to `/api/auth/connect/{platform}?mode=live` when enabled and disables Live OAuth when server credentials are unconfigured.
+- **Verification:** `src/test-phase-6c.ts` OAuth mode tampering test passes.
+- **Files:** `src/lib/auth/oauth-state.ts`, `src/app/api/auth/connect/[provider]/route.ts`, `src/app/api/auth/callback/[provider]/route.ts`, `src/app/api/accounts/route.ts`, `src/app/channels/page.tsx`
+- **Scope:** M
+
+#### Task 30: SSRF Prevention, Authorized Media Workspace Resolution & 180s Shorts Support
+- **Description:** Harden `YouTubeLiveProvider.resolveVideoBuffer` against SSRF (block loopback/private/link-local/metadata IPs, disallow non-HTTPS and redirects, enforce size cap, Timeout, and allowed storage host validation). Enforce `payload.workspaceId` (the post's authorized workspace) when reading local/S3 storage objects. Update YouTube Shorts validation limit from 60s to 180s (3 minutes).
+- **Acceptance criteria:**
+  - [x] Unsafe URLs (`http://127.0.0.1`, `http://169.254.169.254`, `https://localhost`, untrusted hosts, oversized responses) are rejected before socket data consumption.
+  - [x] Cross-tenant media path `/uploads/other_ws/video.mp4` on a post in `ws_A` is rejected with `StorageSecurityError`.
+  - [x] YouTube Shorts up to 180s pass validation; >180s fail.
+- **Verification:** `src/test-phase-6c.ts` SSRF, cross-tenant media, and 180s Shorts tests pass.
+- **Files:** `src/providers/live/youtube.provider.ts`, `src/services/storage.service.ts`, `src/services/publisher.service.ts`, `src/providers/types.ts`
+- **Scope:** M
+
+#### Task 31: Shared Project-Level YouTube Quota Bucket & Atomic Pacific-Time Reservation
+- **Description:** Update `YouTubeQuotaManager` to use a shared project-level bucket (`YOUTUBE_QUOTA_PROJECT_ID` / `YOUTUBE_CLIENT_ID`), reset daily at midnight `America/Los_Angeles`, and reserve quota via atomic conditional `updateMany` (`usedCount: { lt: limitCount }`) so concurrent calls never increment past `limitCount`.
+- **Acceptance criteria:**
+  - [x] Multiple channels share the project quota bucket by default.
+  - [x] Concurrent quota reservations never increment `usedCount` past `limitCount`.
+  - [x] Quota date key uses `America/Los_Angeles` (`YYYY-MM-DD`).
+- **Verification:** `src/test-phase-6c.ts` concurrent quota reservation test passes.
+- **Files:** `src/providers/live/youtube.provider.ts`
+- **Scope:** S
+
+#### Task 32: Instagram Duplicate-Publish Prevention & Fenced Worker Leases
+- **Description:** Persist `remoteContainerId` and `platformPostId` on `PostTarget`. Before retrying Instagram publishing, reconcile existing `platformPostId` or `remoteContainerId` against the Graph API so a permalink failure or mid-publish crash never creates a duplicate post. Add `leaseOwner` fencing token and enforce `nextRetryAt <= now` in `PublisherService`.
+- **Acceptance criteria:**
+  - [x] Permalink failure after `media_publish` persists `platformPostId`; retry reconciles permalink without calling `media_publish` a second time.
+  - [x] Targets with `nextRetryAt > now` are not claimed prematurely.
+  - [x] Stale worker with superseded `leaseOwner` cannot overwrite target state.
+- **Verification:** `src/test-phase-6c.ts` Instagram reconciliation and lease fencing concurrency tests pass.
+- **Files:** `src/providers/live/instagram.provider.ts`, `src/services/publisher.service.ts`, `src/providers/types.ts`
+- **Scope:** M
+
+#### Task 33: Authenticated Media Upload & Presign API Routes
+- **Description:** Implement `POST`/`PUT` `/api/media/upload` and `POST` `/api/media/presign` with session authentication, workspace authorization (`posts:create`), binary signature verification, and real storage persistence.
+- **Acceptance criteria:**
+  - [x] Authenticated users can request presigned upload URLs and upload validated media scoped to their workspace.
+  - [x] Cross-workspace and unauthenticated upload/presign requests are rejected with 401/403.
+- **Verification:** `src/test-phase-6c.ts` media API upload & presign tests pass.
+- **Files:** `src/app/api/media/upload/route.ts`, `src/app/api/media/presign/route.ts`
+- **Scope:** M
+
+#### Task 34 & 35: Tenant-Isolated Analytics & Real Provider Analytics Ingestion
+- **Description:** Eliminate `db.workspace.findFirst()` from `AnalyticsService.getAudienceHeatmap` and `src/app/page.tsx`. Implement real YouTube Analytics and Instagram Insights ingestion with incremental sync (`AnalyticsService.syncWorkspaceAnalytics`), rate-limit/retry handling, snapshot deduplication (`accountId_date`), source attribution (`LIVE_YOUTUBE_ANALYTICS`, `LIVE_INSTAGRAM_INSIGHTS`, `MOCK_SANDBOX`, `UNSUPPORTED_PAID`), `lastSyncedAt` timestamps, and explicit `unavailableMetrics` states (never fabricating missing reach, follower growth, or live heatmaps).
+- **Acceptance criteria:**
+  - [x] Zero `workspace.findFirst()` calls in analytics or dashboard views.
+  - [x] Live accounts never return mock metrics or synthetic 2% follower growth.
+  - [x] Incremental sync upserts daily snapshots without duplicates and records `lastSyncedAt` and `source`.
+- **Verification:** `src/test-phase-6c.ts` analytics isolation, provenance, and sync tests pass.
+- **Files:** `src/services/analytics.service.ts`, `src/providers/live/youtube.provider.ts`, `src/providers/live/instagram.provider.ts`, `src/app/api/analytics/route.ts`, `src/app/api/analytics/sync/route.ts`, `src/app/analytics/page.tsx`, `src/app/page.tsx`, `src/components/analytics/AudienceHeatmap.tsx`
+- **Scope:** L
+
+#### Task 36: Provider-Independent AI Social SEO Assistant
+- **Description:** Create `AiSeoService` supporting configurable AI providers/models (`AI_PROVIDER`, `AI_MODEL` defaulting to `gemini-2.5-flash`, rejecting retired `gemini-2.0-flash`) with automatic fallback to the free local heuristic engine. Provide caption improvements, hook alternatives, hashtag recommendations, and platform-specific formatting with explicit provenance labels and zero virality claims.
+- **Acceptance criteria:**
+  - [x] Works out-of-the-box via heuristic fallback and via configured AI model when API key is present.
+  - [x] Clearly labels output provenance (`AI_MODEL` vs `HEURISTIC_FALLBACK`) and includes non-virality disclaimer.
+- **Verification:** `src/test-phase-6c.ts` AI SEO assistant & fallback tests pass.
+- **Files:** `src/services/ai-seo.service.ts`, `src/services/seo.service.ts`, `src/app/api/seo/assistant/route.ts`, `src/app/seo-studio/page.tsx`
+- **Scope:** M
+
+#### Task 37: Server-Generated PDF Reports with Workspace Authorization
+- **Description:** Implement `ReportService.generateWorkspacePdfReport()` producing a standards-compliant `%PDF-1.4` binary document with workspace branding, date range, source attribution, metric definitions, and explicit `UNAVAILABLE` markers for unsupported metrics. Expose via `GET /api/reports/export` protected by `reports:export` workspace permission.
+- **Acceptance criteria:**
+  - [x] `/api/reports/export` enforces `reports:export` permission (OWNER/APPROVER allowed, EDITOR/cross-tenant rejected with 403).
+  - [x] Returns valid `application/pdf` binary containing workspace branding, source attribution, metric definitions, and unavailable-metric disclosures.
+- **Verification:** `src/test-phase-6c.ts` PDF report authorization and content verification tests pass.
+- **Files:** `src/services/report.service.ts`, `src/app/api/reports/export/route.ts`, `src/components/analytics/ReportView.tsx`
+- **Scope:** M
+
+#### Task 38: Phase 6C Verification Suite & CI Execution
+- **Description:** Build `src/test-phase-6c.ts` covering all Stage 0–3 requirements, add it to `package.json` and `.github/workflows/ci.yml`, run full local clean-reset verification, push to `origin/master`, and verify remote GitHub Actions CI run.
+- **Acceptance criteria:**
+  - [x] All tests in `test-token-vault.ts`, `test-milestone-6a2.ts`, `test-phase-6b.ts`, and `test-phase-6c.ts` pass.
+  - [ ] Remote GitHub Actions CI workflow succeeds on the pushed commit.
+- **Files:** `src/test-phase-6c.ts`, `package.json`, `.github/workflows/ci.yml`
+- **Scope:** M

@@ -71,12 +71,16 @@ model Account {
   postsCount        Int               @default(0)
   accessToken       String?           // AES-256-GCM encrypted envelope (enc:v1:iv:ciphertext:tag)
   refreshToken      String?           // AES-256-GCM encrypted envelope
-  tokenKeyVersion   String?           @default("v1")
-  tokenExpiresAt    DateTime?
-  isMock            Boolean           @default(true)
-  status            String            @default("ACTIVE") // ACTIVE, EXPIRED, ERROR
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  tokenKeyVersion      String?           @default("v1")
+  tokenExpiresAt       DateTime?
+  isMock               Boolean           @default(true)
+  status               String            @default("ACTIVE") // ACTIVE, EXPIRED, ERROR
+  lastSyncedAt         DateTime?
+  syncStatus           String            @default("IDLE")   // IDLE, SYNCING, SYNCED, RATE_LIMITED, ERROR, UNSUPPORTED_PAID
+  syncError            String?
+  audienceActivityJson String?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
 
   postTargets       PostTarget[]
   metrics           MetricSnapshot[]
@@ -125,8 +129,10 @@ model PostTarget {
   maxRetries      Int       @default(3)
   claimedAt           DateTime?
   leaseExpiresAt      DateTime?
+  leaseOwner          String?
   nextRetryAt         DateTime?
   resumableSessionUri String?
+  remoteContainerId   String?
   idempotencyKey      String?
   publishedAt         DateTime?
   createdAt       DateTime  @default(now())
@@ -164,6 +170,7 @@ model OAuthState {
   workspaceId  String
   userId       String
   platform     String   // YOUTUBE, INSTAGRAM, X
+  mode         String   @default("mock") // "mock" | "live"
   codeVerifier String?  // PKCE code_verifier
   isConsumed   Boolean  @default(false)
   expiresAt    DateTime
@@ -188,21 +195,25 @@ model PlatformQuota {
 }
 
 model MetricSnapshot {
-  id          String   @id @default(cuid())
-  accountId   String
-  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  date        DateTime // Snapshot date
-  impressions Int      @default(0)
-  reach       Int      @default(0)
-  engagements Int      @default(0)
-  likes       Int      @default(0)
-  comments    Int      @default(0)
-  shares      Int      @default(0)
-  clicks      Int      @default(0)
-  videoViews  Int      @default(0)
-  followers   Int      @default(0)
-  createdAt   DateTime @default(now())
+  id               String   @id @default(cuid())
+  accountId        String
+  account          Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  date             DateTime // Snapshot date (UTC midnight)
+  impressions      Int      @default(0)
+  reach            Int      @default(0)
+  engagements      Int      @default(0)
+  likes            Int      @default(0)
+  comments         Int      @default(0)
+  shares           Int      @default(0)
+  clicks           Int      @default(0)
+  videoViews       Int      @default(0)
+  followers        Int      @default(0)
+  source           String   @default("MOCK_SANDBOX") // LIVE_YOUTUBE_ANALYTICS, LIVE_INSTAGRAM_INSIGHTS, MOCK_SANDBOX
+  availableMetrics String   @default("[]")           // JSON array of metric keys verified from source
+  syncedAt         DateTime @default(now())
+  createdAt        DateTime @default(now())
 
+  @@unique([accountId, date])
   @@index([accountId, date])
 }
 

@@ -251,7 +251,7 @@ export class SeoService {
     if (charCount > 150 && lines.length === 1) {
       recommendations.push({
         type: "CRITICAL",
-        text: "Break your caption into 2–3 short paragraphs. Dense walls of text suffer a 42% lower read-through rate on mobile.",
+        text: "Break your caption into 2–3 short paragraphs so the opening lines remain readable before the mobile 'See more' truncation point.",
       });
     }
 

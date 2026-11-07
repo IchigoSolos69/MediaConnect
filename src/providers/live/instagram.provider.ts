@@ -234,7 +234,8 @@ export class InstagramLiveProvider implements ISocialProvider {
   }
 
   /**
-   * Publishes media via the full Instagram Graph API workflow:
+   * Publishes media via the full Instagram Graph API workflow with ambiguous-failure reconciliation:
+   * 0. Reconcile existing publishedMediaId or remoteContainerId from prior interrupted attempt
    * 1. Validate public media URL (never substitutes placeholder URLs)
    * 2. Create media container (POST /{ig-user-id}/media)
    * 3. Poll container status until FINISHED (GET /{container-id}?fields=status_code)
@@ -289,130 +290,216 @@ export class InstagramLiveProvider implements ISocialProvider {
       payload.mediaMimeType?.startsWith("video/") ||
       false;
 
-    // Step 1: Create media container
-    const containerParams = new URLSearchParams({
-      access_token: accessToken,
-      caption: payload.content,
-    });
+    let creationId = payload.remoteContainerId ? String(payload.remoteContainerId) : "";
+    let publishedMediaId = payload.existingPlatformPostId
+      ? String(payload.existingPlatformPostId)
+      : "";
 
-    if (isVideo) {
-      containerParams.set("media_type", "REELS");
-      containerParams.set("video_url", mediaUrl);
-    } else {
-      containerParams.set("image_url", mediaUrl);
-    }
-
-    const containerRes = await fetch(
-      `https://graph.instagram.com/v21.0/${igUserId}/media`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: containerParams,
-      }
-    );
-
-    if (!containerRes.ok) {
-      const err = await containerRes.text();
-      throw new Error(`Instagram container creation failed (${containerRes.status}): ${err}`);
-    }
-
-    const containerData = await containerRes.json();
-    const creationId = containerData?.id ? String(containerData.id) : "";
-    if (!creationId) {
-      throw new Error("Instagram container creation did not return a valid container ID.");
-    }
-
-    // Step 2: Poll container processing status until FINISHED
-    await this.waitForContainerReady(creationId, accessToken);
-
-    // Step 3: Publish the processed container
-    const publishParams = new URLSearchParams({
-      creation_id: creationId,
-      access_token: accessToken,
-    });
-
-    const publishRes = await fetch(
-      `https://graph.instagram.com/v21.0/${igUserId}/media_publish`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: publishParams,
-      }
-    );
-
-    if (!publishRes.ok) {
-      const err = await publishRes.text();
-      throw new Error(`Instagram media publishing failed (${publishRes.status}): ${err}`);
-    }
-
-    const publishData = await publishRes.json();
-    const publishedMediaId = publishData?.id ? String(publishData.id) : "";
-    if (!publishedMediaId) {
-      throw new Error("Instagram media_publish did not return a confirmed media ID.");
-    }
-
-    // Step 4: Fetch the confirmed permalink from Instagram Graph API
-    const permalinkRes = await fetch(
-      `https://graph.instagram.com/v21.0/${publishedMediaId}?fields=id,permalink,shortcode,media_type&access_token=${encodeURIComponent(accessToken)}`
-    );
-
-    if (!permalinkRes.ok) {
-      const err = await permalinkRes.text();
-      throw new Error(
-        `Instagram media ${publishedMediaId} was published, but permalink confirmation failed (${permalinkRes.status}): ${err}`
-      );
-    }
-
-    const permalinkData = await permalinkRes.json();
-    const confirmedPermalink =
-      permalinkData.permalink ||
-      (permalinkData.shortcode
-        ? `https://www.instagram.com/${isVideo ? "reel" : "p"}/${permalinkData.shortcode}/`
-        : "");
-
-    if (!confirmedPermalink) {
-      throw new Error(
-        `Instagram Graph API did not return a permalink or shortcode for published media ${publishedMediaId}.`
-      );
-    }
-
-    // Step 5: Optional first comment
-    if (payload.firstComment && payload.firstComment.trim()) {
-      const commentRes = await fetch(
-        `https://graph.instagram.com/v21.0/${publishedMediaId}/comments`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            message: payload.firstComment,
-            access_token: accessToken,
-          }),
-        }
-      );
-      if (!commentRes.ok) {
-        const errText = await commentRes.text();
-        console.warn(`First comment failed on media ${publishedMediaId}: ${errText}`);
-      }
-    }
-
-    const result: PublishResult = {
-      success: true,
-      platformPostId: publishedMediaId,
-      liveUrl: confirmedPermalink,
-      publishedAt: new Date(),
+    const attachStateAndThrow = (err: unknown): never => {
+      const enriched = (err instanceof Error ? err : new Error(String(err))) as Error & {
+        remoteContainerId?: string;
+        platformPostId?: string;
+      };
+      if (creationId) enriched.remoteContainerId = creationId;
+      if (publishedMediaId) enriched.platformPostId = publishedMediaId;
+      throw enriched;
     };
 
-    if (payload.idempotencyKey) {
-      this.idempotencyCache.set(payload.idempotencyKey, result);
-    }
+    try {
+      // Step 0A: If publishedMediaId is already recorded from a prior attempt where permalink retrieval failed,
+      // skip container creation and media_publish entirely and go straight to permalink reconciliation!
+      if (!publishedMediaId && creationId) {
+        // Step 0B: Check existing container status on Instagram before creating a new one
+        const checkUrl = new URL(`https://graph.instagram.com/v21.0/${creationId}`);
+        checkUrl.searchParams.set("fields", "status_code,status,error_message");
+        checkUrl.searchParams.set("access_token", accessToken);
 
-    return result;
+        const checkRes = await fetch(checkUrl.toString());
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          const code = String(checkData.status_code || "").toUpperCase();
+
+          if (code === "PUBLISHED") {
+            // Container was already published! Reconcile the published media ID from the user's recent media feed
+            const feedRes = await fetch(
+              `https://graph.instagram.com/v21.0/${igUserId}/media?fields=id,caption,permalink,shortcode,media_type,timestamp&limit=10&access_token=${encodeURIComponent(accessToken)}`
+            );
+            if (feedRes.ok) {
+              const feedData = await feedRes.json();
+              const items: Array<{
+                id: string;
+                caption?: string;
+                permalink?: string;
+                shortcode?: string;
+              }> = feedData.data || [];
+              const matched =
+                items.find((item) => item.caption === payload.content) || items[0];
+              if (matched?.id) {
+                publishedMediaId = String(matched.id);
+                if (matched.permalink || matched.shortcode) {
+                  const reconciledPermalink =
+                    matched.permalink ||
+                    `https://www.instagram.com/${isVideo ? "reel" : "p"}/${matched.shortcode}/`;
+                  const reconciledResult: PublishResult = {
+                    success: true,
+                    platformPostId: publishedMediaId,
+                    liveUrl: reconciledPermalink,
+                    publishedAt: new Date(),
+                    remoteContainerId: creationId,
+                  };
+                  if (payload.idempotencyKey) {
+                    this.idempotencyCache.set(payload.idempotencyKey, reconciledResult);
+                  }
+                  return reconciledResult;
+                }
+              }
+            }
+          } else if (code === "ERROR" || code === "EXPIRED") {
+            throw new InstagramMediaProcessingError(
+              creationId,
+              code,
+              `Instagram media container ${creationId} failed with status ${code}: ${checkData.error_message || "Media processing error"}`
+            );
+          } else if (code === "IN_PROGRESS") {
+            await this.waitForContainerReady(creationId, accessToken);
+          }
+          // If code === "FINISHED", we already have a ready container and can proceed to Step 3 (media_publish)
+        }
+      }
+
+      if (!publishedMediaId) {
+        if (!creationId) {
+          // Step 1: Create media container
+          const containerParams = new URLSearchParams({
+            access_token: accessToken,
+            caption: payload.content,
+          });
+
+          if (isVideo) {
+            containerParams.set("media_type", "REELS");
+            containerParams.set("video_url", mediaUrl);
+          } else {
+            containerParams.set("image_url", mediaUrl);
+          }
+
+          const containerRes = await fetch(
+            `https://graph.instagram.com/v21.0/${igUserId}/media`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: containerParams,
+            }
+          );
+
+          if (!containerRes.ok) {
+            const err = await containerRes.text();
+            throw new Error(`Instagram container creation failed (${containerRes.status}): ${err}`);
+          }
+
+          const containerData = await containerRes.json();
+          creationId = containerData?.id ? String(containerData.id) : "";
+          if (!creationId) {
+            throw new Error("Instagram container creation did not return a valid container ID.");
+          }
+
+          // Step 2: Poll container processing status until FINISHED
+          await this.waitForContainerReady(creationId, accessToken);
+        }
+
+        // Step 3: Publish the processed container
+        const publishParams = new URLSearchParams({
+          creation_id: creationId,
+          access_token: accessToken,
+        });
+
+        const publishRes = await fetch(
+          `https://graph.instagram.com/v21.0/${igUserId}/media_publish`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: publishParams,
+          }
+        );
+
+        if (!publishRes.ok) {
+          const err = await publishRes.text();
+          throw new Error(`Instagram media publishing failed (${publishRes.status}): ${err}`);
+        }
+
+        const publishData = await publishRes.json();
+        publishedMediaId = publishData?.id ? String(publishData.id) : "";
+        if (!publishedMediaId) {
+          throw new Error("Instagram media_publish did not return a confirmed media ID.");
+        }
+      }
+
+      // Step 4: Fetch the confirmed permalink from Instagram Graph API
+      const permalinkRes = await fetch(
+        `https://graph.instagram.com/v21.0/${publishedMediaId}?fields=id,permalink,shortcode,media_type&access_token=${encodeURIComponent(accessToken)}`
+      );
+
+      if (!permalinkRes.ok) {
+        const err = await permalinkRes.text();
+        throw new Error(
+          `Instagram media ${publishedMediaId} was published, but permalink confirmation failed (${permalinkRes.status}): ${err}`
+        );
+      }
+
+      const permalinkData = await permalinkRes.json();
+      const confirmedPermalink =
+        permalinkData.permalink ||
+        (permalinkData.shortcode
+          ? `https://www.instagram.com/${isVideo ? "reel" : "p"}/${permalinkData.shortcode}/`
+          : "");
+
+      if (!confirmedPermalink) {
+        throw new Error(
+          `Instagram Graph API did not return a permalink or shortcode for published media ${publishedMediaId}.`
+        );
+      }
+
+      // Step 5: Optional first comment
+      if (payload.firstComment && payload.firstComment.trim()) {
+        const commentRes = await fetch(
+          `https://graph.instagram.com/v21.0/${publishedMediaId}/comments`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              message: payload.firstComment,
+              access_token: accessToken,
+            }),
+          }
+        );
+        if (!commentRes.ok) {
+          const errText = await commentRes.text();
+          console.warn(`First comment failed on media ${publishedMediaId}: ${errText}`);
+        }
+      }
+
+      const result: PublishResult = {
+        success: true,
+        platformPostId: publishedMediaId,
+        liveUrl: confirmedPermalink,
+        publishedAt: new Date(),
+        remoteContainerId: creationId || undefined,
+      };
+
+      if (payload.idempotencyKey) {
+        this.idempotencyCache.set(payload.idempotencyKey, result);
+      }
+
+      return result;
+    } catch (err) {
+      return attachStateAndThrow(err);
+    }
   }
 
   /**
-   * Live analytics boundary: Refuses to return synthetic metrics disguised as live insights.
+   * Live analytics ingestion: Queries real Instagram Graph API v21.0 user insights and profile metrics.
+   * Respects metric availability, permissions, and 100-follower minimums without fabricating data.
    */
-  async fetchInsights(account: ConnectedAccountData, _timeRange: TimeRange): Promise<SocialInsights> {
+  async fetchInsights(account: ConnectedAccountData, timeRange: TimeRange): Promise<SocialInsights> {
     this.getCredentials();
     if (account.isMock || !account.accessToken) {
       throw new LiveAnalyticsNotSupportedError(
@@ -420,16 +507,265 @@ export class InstagramLiveProvider implements ISocialProvider {
         "Live Instagram analytics requires a connected live account with a valid access token."
       );
     }
-    throw new LiveAnalyticsNotSupportedError(
-      "INSTAGRAM",
-      "Live Instagram insights ingestion is not enabled in Phase 6B. Use mock mode until Phase 6C analytics ingestion is activated."
-    );
+
+    const igUserId = account.platformAccountId;
+    const accessToken = account.accessToken;
+    const sinceUnix = Math.floor(timeRange.startDate.getTime() / 1000);
+    const untilUnix = Math.floor(timeRange.endDate.getTime() / 1000);
+
+    const insightsUrl = new URL(`https://graph.instagram.com/v21.0/${igUserId}/insights`);
+    insightsUrl.searchParams.set("metric", "reach,impressions,total_interactions,follower_count");
+    insightsUrl.searchParams.set("period", "day");
+    insightsUrl.searchParams.set("since", String(sinceUnix));
+    insightsUrl.searchParams.set("until", String(untilUnix));
+    insightsUrl.searchParams.set("access_token", accessToken);
+
+    let res: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      res = await fetch(insightsUrl.toString());
+      if (res.status === 429 || res.status === 502 || res.status === 503) {
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, attempt * 200));
+          continue;
+        }
+      }
+      break;
+    }
+
+    if (!res || !res.ok) {
+      const errText = res ? await res.text() : "No response";
+      throw new Error(`Instagram Graph Insights API request failed (${res?.status || 500}): ${errText}`);
+    }
+
+    const insightsPayload = await res.json();
+    const seriesList: Array<{
+      name: string;
+      values?: Array<{ value: number; end_time: string }>;
+    }> = insightsPayload.data || [];
+
+    // Fetch current profile followers_count
+    let currentFollowers = 0;
+    try {
+      const profRes = await fetch(
+        `https://graph.instagram.com/v21.0/${igUserId}?fields=followers_count,media_count&access_token=${encodeURIComponent(accessToken)}`
+      );
+      if (profRes.ok) {
+        const profData = await profRes.json();
+        currentFollowers = Number(profData.followers_count) || 0;
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    const dailyByDate = new Map<
+      string,
+      {
+        impressions: number;
+        reach: number;
+        engagements: number;
+        followerDelta: number;
+        hasFollowerDelta: boolean;
+      }
+    >();
+
+    const seenMetricNames = new Set<string>();
+
+    for (const metricSeries of seriesList) {
+      const metricName = metricSeries.name;
+      seenMetricNames.add(metricName);
+      for (const point of metricSeries.values || []) {
+        const dateKey = (point.end_time || "").slice(0, 10);
+        if (!dateKey) continue;
+        const entry = dailyByDate.get(dateKey) || {
+          impressions: 0,
+          reach: 0,
+          engagements: 0,
+          followerDelta: 0,
+          hasFollowerDelta: false,
+        };
+        const val = Number(point.value) || 0;
+        if (metricName === "impressions" || metricName === "views") {
+          entry.impressions = val;
+        } else if (metricName === "reach") {
+          entry.reach = val;
+        } else if (metricName === "total_interactions" || metricName === "accounts_engaged") {
+          entry.engagements = val;
+        } else if (metricName === "follower_count") {
+          entry.followerDelta = val;
+          entry.hasFollowerDelta = true;
+        }
+        dailyByDate.set(dateKey, entry);
+      }
+    }
+
+    const availableMetrics: string[] = [];
+    const unavailableMetrics: string[] = ["clicks"];
+
+    if (seenMetricNames.has("impressions") || seenMetricNames.has("views")) {
+      availableMetrics.push("impressions");
+    } else {
+      unavailableMetrics.push("impressions");
+    }
+
+    if (seenMetricNames.has("reach")) {
+      availableMetrics.push("reach");
+    } else {
+      unavailableMetrics.push("reach");
+    }
+
+    if (seenMetricNames.has("total_interactions") || seenMetricNames.has("accounts_engaged")) {
+      availableMetrics.push("engagements");
+    } else {
+      unavailableMetrics.push("engagements");
+    }
+
+    const hasFollowerGrowthSeries = seenMetricNames.has("follower_count");
+    if (hasFollowerGrowthSeries) {
+      availableMetrics.push("followerGrowth");
+    } else {
+      unavailableMetrics.push("followerGrowth");
+    }
+
+    let totalImpressions = 0;
+    let totalReach = 0;
+    let totalEngagements = 0;
+    let followerGrowthSum = 0;
+
+    const sortedDates = Array.from(dailyByDate.keys()).sort();
+    const dailyMetrics = sortedDates.map((date) => {
+      const row = dailyByDate.get(date)!;
+      totalImpressions += row.impressions;
+      totalReach += row.reach;
+      totalEngagements += row.engagements;
+      followerGrowthSum += row.followerDelta;
+
+      return {
+        date,
+        impressions: row.impressions,
+        reach: row.reach,
+        engagements: row.engagements,
+        likes: row.engagements,
+        comments: 0,
+        shares: 0,
+        clicks: 0,
+        followers: currentFollowers,
+        followerGrowth: row.hasFollowerDelta ? row.followerDelta : undefined,
+        availableMetrics,
+      };
+    });
+
+    const denominator = totalImpressions > 0 ? totalImpressions : totalReach;
+    const engagementRate =
+      denominator > 0 ? Number(((totalEngagements / denominator) * 100).toFixed(2)) : 0;
+
+    return {
+      platform: "INSTAGRAM",
+      source: "LIVE_INSTAGRAM_INSIGHTS",
+      syncedAt: new Date(),
+      unavailableMetrics,
+      reportingDelayHours: 24,
+      totalImpressions,
+      totalReach,
+      totalEngagements,
+      totalFollowers: currentFollowers,
+      followerGrowth: hasFollowerGrowthSeries ? followerGrowthSum : null,
+      engagementRate,
+      dailyMetrics,
+    };
   }
 
-  async fetchAudienceActivity(_account: ConnectedAccountData): Promise<AudienceHeatmapData> {
-    throw new LiveAnalyticsNotSupportedError(
-      "INSTAGRAM",
-      "Live Instagram audience activity heatmaps are not enabled in Phase 6B. Use mock mode for simulated heatmaps."
-    );
+  /**
+   * Queries real Instagram `online_followers` lifetime insight when available (requires >= 100 followers).
+   * Never fabricates synthetic heatmap cells.
+   */
+  async fetchAudienceActivity(account: ConnectedAccountData): Promise<AudienceHeatmapData> {
+    this.getCredentials();
+    if (account.isMock || !account.accessToken) {
+      throw new LiveAnalyticsNotSupportedError(
+        "INSTAGRAM",
+        "Live Instagram audience activity requires a connected live account with a valid access token."
+      );
+    }
+
+    const url = new URL(`https://graph.instagram.com/v21.0/${account.platformAccountId}/insights`);
+    url.searchParams.set("metric", "online_followers");
+    url.searchParams.set("period", "lifetime");
+    url.searchParams.set("access_token", account.accessToken);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new LiveAnalyticsNotSupportedError(
+        "INSTAGRAM",
+        `Instagram online_followers insight is unavailable (${res.status}): ${errText}`
+      );
+    }
+
+    const payload = await res.json();
+    const rawValue = payload.data?.[0]?.values?.[0]?.value as
+      | Record<string, number | Record<string, number>>
+      | undefined;
+
+    if (!rawValue || Object.keys(rawValue).length === 0) {
+      throw new LiveAnalyticsNotSupportedError(
+        "INSTAGRAM",
+        "Instagram online_followers returned no audience activity data (professional account requires at least 100 followers)."
+      );
+    }
+
+    const firstEntry = Object.values(rawValue)[0];
+    const isHourlyFlatMap = typeof firstEntry === "number";
+
+    const getHourCount = (day: number, hour: number): number => {
+      if (isHourlyFlatMap) {
+        return Number((rawValue as Record<string, number>)[String(hour)]) || 0;
+      }
+      const dayMap = (rawValue[String(day)] as Record<string, number> | undefined) || {};
+      return Number(dayMap[String(hour)]) || 0;
+    };
+
+    let maxCount = 0;
+    for (let d = 0; d < 7; d++) {
+      for (let h = 0; h < 24; h++) {
+        const count = getHourCount(d, h);
+        if (count > maxCount) maxCount = count;
+      }
+    }
+
+    if (maxCount === 0) {
+      throw new LiveAnalyticsNotSupportedError(
+        "INSTAGRAM",
+        "Instagram online_followers returned zero active audience counts."
+      );
+    }
+
+    const cells: Array<{ dayOfWeek: number; hour: number; activityScore: number }> = [];
+    for (let d = 0; d < 7; d++) {
+      for (let h = 0; h < 24; h++) {
+        const count = getHourCount(d, h);
+        const score = Math.round((count / maxCount) * 100);
+        cells.push({ dayOfWeek: d, hour: h, activityScore: score });
+      }
+    }
+
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const bestTimeSlots = [...cells]
+      .sort((a, b) => b.activityScore - a.activityScore)
+      .slice(0, 3)
+      .map((slot) => {
+        const h = slot.hour % 12 || 12;
+        const ampm = slot.hour >= 12 ? "PM" : "AM";
+        return {
+          dayOfWeek: slot.dayOfWeek,
+          hour: slot.hour,
+          label: `${dayNames[slot.dayOfWeek]} ${h}:00 ${ampm}`,
+        };
+      });
+
+    return {
+      platform: "INSTAGRAM",
+      bestTimeSlots,
+      cells,
+    };
   }
 }

@@ -119,6 +119,201 @@ export function assertTenantStorageScope(storageKey: string, workspaceId: string
 }
 
 /**
+ * Checks whether an IPv4 or IPv6 literal or hostname resolves to a private, loopback, link-local, or cloud metadata address.
+ */
+export function isPrivateOrInternalHost(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!lower) return true;
+
+  if (
+    lower === "localhost" ||
+    lower.endsWith(".localhost") ||
+    lower.endsWith(".local") ||
+    lower.endsWith(".internal") ||
+    lower === "metadata.google.internal" ||
+    lower === "instance-data" ||
+    lower === "0.0.0.0" ||
+    lower === "::1" ||
+    lower === "::" ||
+    lower.startsWith("fe80:") ||
+    lower.startsWith("fc00:") ||
+    lower.startsWith("fd00:") ||
+    lower.startsWith("::ffff:127.") ||
+    lower.startsWith("::ffff:10.") ||
+    lower.startsWith("::ffff:192.168.") ||
+    lower.startsWith("::ffff:169.254.")
+  ) {
+    return true;
+  }
+
+  // Check IPv4 numeric ranges
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(lower);
+  if (ipv4Match) {
+    const octets = ipv4Match.slice(1, 5).map((x) => parseInt(x, 10));
+    if (octets.some((o) => o < 0 || o > 255)) return true;
+    const [a, b] = octets;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // Cloud metadata 169.254.169.254
+    if (a === 172 && b >= 16 && b <= 31) return true; // RFC 1918
+    if (a === 192 && b === 168) return true; // RFC 1918
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a >= 224) return true; // Multicast / reserved
+    return true; // Disallow raw IP literals for remote media URLs; require verified DNS hostnames
+  }
+
+  // Disallow raw IPv6 literals
+  if (lower.includes(":")) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Returns the set of allowed remote HTTPS media hostnames configured for this deployment.
+ */
+export function getAllowedMediaHosts(): Set<string> {
+  const allowed = new Set<string>([
+    "cdn.mediaconnect.io",
+    "media.mediaconnect.io",
+    "images.unsplash.com",
+  ]);
+
+  const envUrls = [process.env.STORAGE_PUBLIC_BASE_URL, process.env.S3_ENDPOINT];
+  for (const rawUrl of envUrls) {
+    if (rawUrl) {
+      try {
+        const parsed = new URL(rawUrl);
+        if (parsed.hostname && !isPrivateOrInternalHost(parsed.hostname)) {
+          allowed.add(parsed.hostname.toLowerCase());
+        }
+      } catch {
+        // Ignore invalid URL in env
+      }
+    }
+  }
+
+  if (process.env.ALLOWED_MEDIA_HOSTS) {
+    for (const host of process.env.ALLOWED_MEDIA_HOSTS.split(",")) {
+      const cleaned = host.trim().toLowerCase();
+      if (cleaned && !isPrivateOrInternalHost(cleaned)) {
+        allowed.add(cleaned);
+      }
+    }
+  }
+
+  return allowed;
+}
+
+/**
+ * Validates that a remote media URL is safe from SSRF, uses HTTPS, belongs to the allowed media hosts,
+ * and does not cross workspace tenant boundaries when referencing workspace-prefixed objects.
+ */
+export function validateSafeRemoteMediaUrl(mediaUrl: string, authorizedWorkspaceId?: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(mediaUrl);
+  } catch {
+    throw new StorageSecurityError(`Invalid media URL format: ${mediaUrl}`);
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new StorageSecurityError(
+      `SSRF protection: Only HTTPS remote media URLs are permitted (received protocol '${parsed.protocol}').`
+    );
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new StorageSecurityError("SSRF protection: Media URLs must not contain embedded credentials.");
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (isPrivateOrInternalHost(hostname)) {
+    throw new StorageSecurityError(
+      `SSRF protection: Access to internal, loopback, private, or IP-literal host '${hostname}' is forbidden.`
+    );
+  }
+
+  const allowedHosts = getAllowedMediaHosts();
+  const isAllowedHost =
+    allowedHosts.has(hostname) ||
+    hostname.endsWith(".r2.cloudflarestorage.com") ||
+    hostname.endsWith(".amazonaws.com");
+
+  if (!isAllowedHost) {
+    throw new StorageSecurityError(
+      `SSRF protection: Host '${hostname}' is not in the authorized media storage allowlist.`
+    );
+  }
+
+  if (parsed.pathname.includes("..") || parsed.pathname.includes("\\")) {
+    throw new StorageSecurityError("Path traversal sequence detected in remote media URL.");
+  }
+
+  // If the URL path references a workspace-scoped storage path (e.g., /workspaces/<wsId>/... or /uploads/<wsId>/...),
+  // enforce that <wsId> matches the post's authorized workspaceId!
+  if (authorizedWorkspaceId) {
+    const safeWs = sanitizeStorageSegment(authorizedWorkspaceId);
+    const wsMatch = /\/(?:workspaces|uploads)\/([^/]+)\//.exec(parsed.pathname);
+    if (wsMatch && wsMatch[1] !== safeWs) {
+      throw new StorageSecurityError(
+        `Tenant isolation violation: Media URL belongs to workspace '${wsMatch[1]}', but post belongs to '${safeWs}'.`
+      );
+    }
+  }
+
+  return parsed;
+}
+
+/**
+ * Downloads remote media with SSRF protections, redirect blocking, timeout, and strict byte-size cap.
+ */
+export async function fetchSafeRemoteMedia(
+  mediaUrl: string,
+  options?: {
+    authorizedWorkspaceId?: string;
+    maxBytes?: number;
+    timeoutMs?: number;
+  }
+): Promise<{ buffer: Buffer; contentType: string | null }> {
+  const maxBytes = options?.maxBytes ?? 100 * 1024 * 1024; // 100 MB cap
+  const timeoutMs = options?.timeoutMs ?? 15_000;
+  const validatedUrl = validateSafeRemoteMediaUrl(mediaUrl, options?.authorizedWorkspaceId);
+
+  const res = await fetch(validatedUrl.toString(), {
+    method: "GET",
+    redirect: "error", // Never follow open redirects to internal/private endpoints
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to download video media from ${validatedUrl.origin} (HTTP ${res.status})`);
+  }
+
+  const contentLengthHeader = res.headers.get("content-length");
+  if (contentLengthHeader) {
+    const declaredBytes = parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      throw new StorageSecurityError(
+        `Remote media Content-Length (${declaredBytes} bytes) exceeds maximum allowed limit (${maxBytes} bytes).`
+      );
+    }
+  }
+
+  const arrayBuf = await res.arrayBuffer();
+  if (arrayBuf.byteLength > maxBytes) {
+    throw new StorageSecurityError(
+      `Downloaded media size (${arrayBuf.byteLength} bytes) exceeds maximum allowed limit (${maxBytes} bytes).`
+    );
+  }
+
+  return {
+    buffer: Buffer.from(arrayBuf),
+    contentType: res.headers.get("content-type"),
+  };
+}
+
+/**
  * Inspects binary magic bytes to verify the buffer matches the claimed MIME type.
  */
 export function verifyFileSignature(buffer: Buffer, mimeType: string): { valid: boolean; reason?: string } {
@@ -680,8 +875,10 @@ export class StorageService {
                 `YouTube Shorts requires a vertical 9:16 aspect ratio (detected ${aspectRatio}:1).`
               );
             }
-            if (input.durationSeconds && input.durationSeconds > 60) {
-              errors.push(`YouTube Shorts maximum duration is 60 seconds (video is ${input.durationSeconds}s).`);
+            if (input.durationSeconds && input.durationSeconds > 180) {
+              errors.push(
+                `YouTube Shorts maximum duration is 180 seconds (3 minutes; video is ${input.durationSeconds}s).`
+              );
             }
           } else if (!isWidescreen) {
             warnings.push(
