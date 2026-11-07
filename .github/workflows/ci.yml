@@ -57,6 +57,9 @@ jobs:
       - name: Run Security & Production Hardening Test Suite (6A.2)
         run: npx tsx src/test-milestone-6a2.ts
 
+      - name: Run Phase 6B Deterministic Live Provider & Storage Suite
+        run: npx tsx src/test-phase-6b.ts
+
       - name: TypeScript Type Check
         run: npx tsc --noEmit
 

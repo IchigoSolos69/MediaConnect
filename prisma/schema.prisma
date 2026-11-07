@@ -123,10 +123,12 @@ model PostTarget {
   errorMessage    String?
   retryCount      Int       @default(0)
   maxRetries      Int       @default(3)
-  claimedAt       DateTime?
-  leaseExpiresAt  DateTime?
-  idempotencyKey  String?
-  publishedAt     DateTime?
+  claimedAt           DateTime?
+  leaseExpiresAt      DateTime?
+  nextRetryAt         DateTime?
+  resumableSessionUri String?
+  idempotencyKey      String?
+  publishedAt         DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -154,6 +156,35 @@ model RateLimitAttempt {
   expiresAt      DateTime
 
   @@index([key, expiresAt])
+}
+
+model OAuthState {
+  id           String   @id @default(cuid())
+  stateToken   String   @unique
+  workspaceId  String
+  userId       String
+  platform     String   // YOUTUBE, INSTAGRAM, X
+  codeVerifier String?  // PKCE code_verifier
+  isConsumed   Boolean  @default(false)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([stateToken])
+  @@index([expiresAt])
+}
+
+model PlatformQuota {
+  id         String   @id @default(cuid())
+  platform   String   // YOUTUBE
+  entityId   String   // channelId or projectId
+  date       String   // YYYY-MM-DD
+  usedCount  Int      @default(0)
+  limitCount Int      @default(100)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([platform, entityId, date])
+  @@index([platform, entityId, date])
 }
 
 model MetricSnapshot {

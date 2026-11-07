@@ -32,6 +32,8 @@ async function main() {
   }
 
   // Clean existing data for reproducible testing
+  await prisma.oAuthState.deleteMany();
+  await prisma.platformQuota.deleteMany();
   await prisma.rateLimitAttempt.deleteMany();
   await prisma.revokedSession.deleteMany();
   await prisma.metricSnapshot.deleteMany();

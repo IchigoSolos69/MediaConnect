@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authenticateRequest, authorizeWorkspaceAccess, handleAuthApiError } from "@/lib/auth/server";
-import { getSocialProvider, SocialPlatform } from "@/providers";
-import { verifyOAuthState, OAuthStateError } from "@/lib/auth/oauth-state";
+import { getSocialProvider, SocialPlatform, ProviderConfigurationError } from "@/providers";
+import { consumeOAuthState, OAuthStateError } from "@/lib/auth/oauth-state";
 import { TokenVault } from "@/lib/crypto/vault";
 import { auditSecurityEvent } from "@/lib/security/audit";
 
@@ -31,7 +31,6 @@ export async function GET(
 
     // 1. Handle OAuth provider error / cancellation
     if (oauthError) {
-      console.warn(`OAuth authorization rejected by ${provider}: ${oauthError} - ${oauthErrorDesc}`);
       return NextResponse.redirect(
         `${baseUrl}/channels?error=${encodeURIComponent(oauthErrorDesc || oauthError)}`
       );
@@ -44,55 +43,47 @@ export async function GET(
       );
     }
 
-    // 2. Cryptographic state verification (Anti-CSRF & session fixation protection)
-    let statePayload;
+    // 2. Authenticate current user session first
+    const session = await authenticateRequest(request);
+
+    // 3. Atomically verify and consume single-use OAuth state + retrieve PKCE verifier
+    let consumedState;
     try {
-      statePayload = verifyOAuthState(state);
+      consumedState = await consumeOAuthState(state, normalizedPlatform, session.userId);
     } catch (stateErr) {
       const err = stateErr as OAuthStateError;
+      const isSessionMismatch = err.message.includes("session mismatch");
       auditSecurityEvent({
-        type: "SECURITY_AUDIT",
-        event: "OAUTH_CSRF_REJECTED",
-        details: { provider, error: err.message },
-      });
-      return NextResponse.redirect(
-        `${baseUrl}/channels?error=${encodeURIComponent("OAuth CSRF validation failed: " + err.message)}`
-      );
-    }
-
-    if (statePayload.platform !== normalizedPlatform) {
-      return NextResponse.json(
-        { success: false, error: "State platform mismatch" },
-        { status: 400 }
-      );
-    }
-
-    // 3. Authenticate current user session and ensure tenant match
-    const session = await authenticateRequest(request);
-    if (session.userId !== statePayload.userId) {
-      auditSecurityEvent({
-        type: "SECURITY_AUDIT",
-        event: "CROSS_TENANT_ATTEMPT",
+        event: isSessionMismatch ? "CROSS_TENANT_ATTEMPT" : "OAUTH_CSRF_REJECTED",
         userId: session.userId,
-        workspaceId: statePayload.workspaceId,
-        details: { reason: "User session does not match OAuth state initiator" },
+        details: { provider: normalizedPlatform, error: err.message },
       });
       return NextResponse.redirect(
-        `${baseUrl}/channels?error=${encodeURIComponent("OAuth session mismatch: Please re-authenticate.")}`
+        `${baseUrl}/channels?error=${encodeURIComponent(err.message)}`
       );
     }
 
     // 4. Verify workspace authorization
     const membership = await authorizeWorkspaceAccess(
       session.userId,
-      statePayload.workspaceId,
+      consumedState.workspaceId,
       "channels:connect"
     );
 
-    // 5. Exchange code for credentials via social provider adapter
-    const socialMode = (process.env.NEXT_PUBLIC_SOCIAL_MODE as "mock" | "live") || "mock";
+    const requestedMode = searchParams.get("mode");
+    const socialMode: "mock" | "live" =
+      requestedMode === "live" || requestedMode === "mock"
+        ? requestedMode
+        : ((process.env.NEXT_PUBLIC_SOCIAL_MODE as "mock" | "live") || "mock");
+
+    // 5. Exchange code (and PKCE code_verifier) for credentials via social provider adapter
     const providerInstance = getSocialProvider(normalizedPlatform, socialMode);
-    const authResult = await providerInstance.exchangeCode(code);
+    const authResult = await providerInstance.exchangeCode(
+      code,
+      consumedState.codeVerifier || undefined
+    );
+
+    const tokenExpiresAt = new Date(Date.now() + authResult.expiresInSeconds * 1000);
 
     // 6. Find or initialize account record
     const existing = await db.account.findFirst({
@@ -107,7 +98,7 @@ export async function GET(
       existing?.id ||
       `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
-    // 7. Store credentials in AES-256-GCM Token Vault
+    // 7. Store credentials in AES-256-GCM Token Vault bound to accountId AAD
     const encryptedAccess = TokenVault.encrypt(authResult.accessToken, accountId, "v1");
     const encryptedRefresh = authResult.refreshToken
       ? TokenVault.encrypt(authResult.refreshToken, accountId, "v1")
@@ -124,6 +115,7 @@ export async function GET(
           accessToken: encryptedAccess,
           refreshToken: encryptedRefresh,
           tokenKeyVersion: "v1",
+          tokenExpiresAt,
           status: "ACTIVE",
           isMock: socialMode === "mock",
           updatedAt: new Date(),
@@ -143,6 +135,7 @@ export async function GET(
           accessToken: encryptedAccess,
           refreshToken: encryptedRefresh,
           tokenKeyVersion: "v1",
+          tokenExpiresAt,
           status: "ACTIVE",
           isMock: socialMode === "mock",
         },
@@ -151,7 +144,6 @@ export async function GET(
 
     // 8. Audit event
     auditSecurityEvent({
-      type: "SECURITY_AUDIT",
       event: "CHANNEL_CONNECTED",
       userId: session.userId,
       workspaceId: membership.workspaceId,
@@ -163,9 +155,16 @@ export async function GET(
       },
     });
 
-    const redirectUrl = `${baseUrl}/channels?status=connected&platform=${normalizedPlatform}`;
-    return NextResponse.redirect(redirectUrl);
+    return NextResponse.redirect(
+      `${baseUrl}/channels?status=connected&platform=${normalizedPlatform}`
+    );
   } catch (error) {
+    if (error instanceof ProviderConfigurationError) {
+      return NextResponse.json(
+        { success: false, error: error.message, platform: error.platform },
+        { status: 503 }
+      );
+    }
     return handleAuthApiError(error);
   }
 }

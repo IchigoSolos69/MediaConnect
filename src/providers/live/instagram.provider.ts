@@ -8,27 +8,47 @@ import {
   SocialInsights,
   TimeRange,
   AudienceHeatmapData,
+  ProviderConfigurationError,
+  LiveAnalyticsNotSupportedError,
 } from "../types";
+
+export class InstagramMediaProcessingError extends Error {
+  public containerId: string;
+  public statusCode: string;
+  constructor(containerId: string, statusCode: string, message: string) {
+    super(message);
+    this.name = "InstagramMediaProcessingError";
+    this.containerId = containerId;
+    this.statusCode = statusCode;
+  }
+}
 
 export class InstagramLiveProvider implements ISocialProvider {
   public platform: SocialPlatform = "INSTAGRAM";
-  private appId: string;
-  private appSecret: string;
-  private redirectUri: string;
   private idempotencyCache = new Map<string, PublishResult>();
 
-  constructor() {
-    this.appId = process.env.META_APP_ID || process.env.INSTAGRAM_CLIENT_ID || "";
-    this.appSecret = process.env.META_APP_SECRET || process.env.INSTAGRAM_CLIENT_SECRET || "";
+  private getCredentials(): { appId: string; appSecret: string; redirectUri: string } {
+    const appId = process.env.META_APP_ID || process.env.INSTAGRAM_CLIENT_ID || "";
+    const appSecret = process.env.META_APP_SECRET || process.env.INSTAGRAM_CLIENT_SECRET || "";
     const baseUrl = process.env.NEXTAUTH_URL || process.env.APP_URL || "http://localhost:3000";
-    this.redirectUri = `${baseUrl}/api/auth/callback/instagram`;
+    const redirectUri = `${baseUrl.replace(/\/+$/, "")}/api/auth/callback/instagram`;
+
+    if (!appId || !appSecret) {
+      throw new ProviderConfigurationError(
+        "INSTAGRAM",
+        "Instagram live integration is not configured: META_APP_ID and META_APP_SECRET environment variables are required."
+      );
+    }
+
+    return { appId, appSecret, redirectUri };
   }
 
   /**
-   * Generates Instagram Login authorization URL.
-   * Connects eligible professional/creator accounts directly without requiring Facebook Page linkage.
+   * Generates Instagram Login authorization URL for professional (Creator/Business) accounts.
    */
   async getAuthUrl(state: string): Promise<string> {
+    const { appId, redirectUri } = this.getCredentials();
+
     const scopes = [
       "instagram_business_basic",
       "instagram_business_content_publish",
@@ -37,8 +57,8 @@ export class InstagramLiveProvider implements ISocialProvider {
     ].join(",");
 
     const params = new URLSearchParams({
-      client_id: this.appId || "demo_instagram_app_id",
-      redirect_uri: this.redirectUri,
+      client_id: appId,
+      redirect_uri: redirectUri,
       scope: scopes,
       response_type: "code",
       state,
@@ -48,33 +68,24 @@ export class InstagramLiveProvider implements ISocialProvider {
   }
 
   /**
-   * Exchanges OAuth code for short-lived token, then exchanges for 60-day long-lived token.
+   * Exchanges OAuth code for short-lived token, upgrades to a 60-day long-lived token,
+   * and verifies the professional account profile via Instagram Graph API.
    */
   async exchangeCode(code: string): Promise<AuthTokenResult> {
-    if (!this.appId || !this.appSecret) {
-      // Offline sandbox fallback when running without live Meta credentials
-      return {
-        accessToken: `live_sandbox_ig_token_${Math.random().toString(36).substring(7)}`,
-        expiresInSeconds: 60 * 24 * 3600, // 60 days
-        platformAccountId: "17841400000000001",
-        username: "@acme_creative",
-        displayName: "Acme Creative Studio",
-        avatarUrl: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150",
-        followersCount: 84500,
-      };
-    }
+    const { appId, appSecret, redirectUri } = this.getCredentials();
 
     // Step 1: Exchange code for short-lived access token
     const tokenFormData = new URLSearchParams({
-      client_id: this.appId,
-      client_secret: this.appSecret,
+      client_id: appId,
+      client_secret: appSecret,
       grant_type: "authorization_code",
-      redirect_uri: this.redirectUri,
+      redirect_uri: redirectUri,
       code,
     });
 
     const tokenRes = await fetch("https://api.instagram.com/oauth/access_token", {
       method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: tokenFormData,
     });
 
@@ -87,64 +98,63 @@ export class InstagramLiveProvider implements ISocialProvider {
     const shortLivedToken = shortTokenData.access_token;
     const igUserId = shortTokenData.user_id;
 
-    // Step 2: Exchange for long-lived (60 days) access token
+    if (!shortLivedToken) {
+      throw new Error("Instagram OAuth response did not include an access_token");
+    }
+
+    // Step 2: Upgrade to 60-day long-lived access token
     const longTokenUrl = new URL("https://graph.instagram.com/access_token");
     longTokenUrl.searchParams.set("grant_type", "ig_exchange_token");
-    longTokenUrl.searchParams.set("client_secret", this.appSecret);
+    longTokenUrl.searchParams.set("client_secret", appSecret);
     longTokenUrl.searchParams.set("access_token", shortLivedToken);
 
     const longRes = await fetch(longTokenUrl.toString());
-    let accessToken = shortLivedToken;
-    let expiresInSeconds = 3600;
-
-    if (longRes.ok) {
-      const longData = await longRes.json();
-      accessToken = longData.access_token;
-      expiresInSeconds = longData.expires_in || 5184000; // 60 days in seconds
+    if (!longRes.ok) {
+      const errText = await longRes.text();
+      throw new Error(`Instagram long-lived token exchange failed (${longRes.status}): ${errText}`);
     }
 
-    // Step 3: Fetch profile information
+    const longData = await longRes.json();
+    const accessToken = longData.access_token || shortLivedToken;
+    const expiresInSeconds = Number(longData.expires_in) || 5184000;
+
+    // Step 3: Fetch verified professional account profile
     const profileRes = await fetch(
-      `https://graph.instagram.com/v21.0/me?fields=user_id,username,name,profile_picture_url,followers_count&access_token=${accessToken}`
+      `https://graph.instagram.com/v21.0/me?fields=user_id,username,name,profile_picture_url,followers_count,account_type&access_token=${encodeURIComponent(accessToken)}`
     );
 
-    let username = `@ig_user_${igUserId}`;
-    let displayName = "Instagram Business Account";
-    let avatarUrl: string | undefined;
-    let followersCount = 0;
+    if (!profileRes.ok) {
+      const errText = await profileRes.text();
+      throw new Error(`Failed to fetch Instagram account profile (${profileRes.status}): ${errText}`);
+    }
 
-    if (profileRes.ok) {
-      const profileData = await profileRes.json();
-      username = profileData.username ? `@${profileData.username}` : username;
-      displayName = profileData.name || displayName;
-      avatarUrl = profileData.profile_picture_url;
-      followersCount = profileData.followers_count || 0;
+    const profileData = await profileRes.json();
+    const resolvedId = String(profileData.user_id || profileData.id || igUserId || "");
+    if (!resolvedId || !profileData.username) {
+      throw new Error("Instagram profile response did not contain a valid user_id and username");
     }
 
     return {
       accessToken,
+      refreshToken: accessToken, // Instagram refreshes long-lived tokens directly via ig_refresh_token
       expiresInSeconds,
-      platformAccountId: igUserId ? String(igUserId) : "17841400000000001",
-      username,
-      displayName,
-      avatarUrl,
-      followersCount,
+      platformAccountId: resolvedId,
+      username: profileData.username.startsWith("@")
+        ? profileData.username
+        : `@${profileData.username}`,
+      displayName: profileData.name || profileData.username,
+      avatarUrl: profileData.profile_picture_url,
+      followersCount: Number(profileData.followers_count) || 0,
     };
   }
 
   /**
-   * Refreshes a long-lived Instagram access token.
+   * Refreshes a long-lived Instagram access token for another 60 days.
    */
   async refreshToken(token: string): Promise<AuthTokenResult> {
-    if (!this.appId || !this.appSecret) {
-      return {
-        accessToken: `refreshed_live_ig_${Math.random().toString(36).substring(7)}`,
-        expiresInSeconds: 60 * 24 * 3600,
-        platformAccountId: "17841400000000001",
-        username: "@acme_creative",
-        displayName: "Acme Creative Studio",
-        followersCount: 84500,
-      };
+    this.getCredentials();
+    if (!token) {
+      throw new Error("Cannot refresh Instagram token: token is empty");
     }
 
     const refreshUrl = new URL("https://graph.instagram.com/refresh_access_token");
@@ -153,75 +163,139 @@ export class InstagramLiveProvider implements ISocialProvider {
 
     const res = await fetch(refreshUrl.toString());
     if (!res.ok) {
-      throw new Error(`Failed to refresh Instagram access token (${res.status})`);
+      const errText = await res.text();
+      throw new Error(`Failed to refresh Instagram access token (${res.status}): ${errText}`);
     }
 
     const data = await res.json();
+    if (!data.access_token) {
+      throw new Error("Instagram token refresh response did not contain access_token");
+    }
+
     return {
       accessToken: data.access_token,
-      expiresInSeconds: data.expires_in || 5184000,
-      platformAccountId: "17841400000000001",
-      username: "@acme_creative",
-      displayName: "Acme Creative Studio",
-      followersCount: 84500,
+      refreshToken: data.access_token,
+      expiresInSeconds: Number(data.expires_in) || 5184000,
+      platformAccountId: "",
+      username: "",
+      displayName: "",
+      followersCount: 0,
     };
   }
 
   /**
-   * Publishes media via Instagram Graph API 2-Step Container Flow:
-   * Step 1: Create media container (POST /{ig-user-id}/media)
-   * Step 2: Publish container (POST /{ig-user-id}/media_publish)
-   * Optional Step 3: Auto-publish first comment with hashtags
+   * Polls Instagram media container processing status until FINISHED.
+   */
+  private async waitForContainerReady(
+    containerId: string,
+    accessToken: string
+  ): Promise<void> {
+    const maxAttempts = parseInt(process.env.INSTAGRAM_POLL_MAX_ATTEMPTS || "10", 10);
+    const baseIntervalMs = parseInt(process.env.INSTAGRAM_POLL_INTERVAL_MS || "1000", 10);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const statusUrl = new URL(`https://graph.instagram.com/v21.0/${containerId}`);
+      statusUrl.searchParams.set("fields", "status_code,status,error_message");
+      statusUrl.searchParams.set("access_token", accessToken);
+
+      const res = await fetch(statusUrl.toString());
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(
+          `Failed to check Instagram media container ${containerId} status (${res.status}): ${errText}`
+        );
+      }
+
+      const data = await res.json();
+      const statusCode = String(data.status_code || "").toUpperCase();
+
+      if (statusCode === "FINISHED" || statusCode === "PUBLISHED") {
+        return;
+      }
+
+      if (statusCode === "ERROR" || statusCode === "EXPIRED") {
+        throw new InstagramMediaProcessingError(
+          containerId,
+          statusCode,
+          `Instagram media container ${containerId} failed with status ${statusCode}: ${data.error_message || data.status || "Media processing error"}`
+        );
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, baseIntervalMs));
+      }
+    }
+
+    throw new InstagramMediaProcessingError(
+      containerId,
+      "IN_PROGRESS",
+      `Instagram media container ${containerId} did not finish processing after ${maxAttempts} polling attempts.`
+    );
+  }
+
+  /**
+   * Publishes media via the full Instagram Graph API workflow:
+   * 1. Validate public media URL (never substitutes placeholder URLs)
+   * 2. Create media container (POST /{ig-user-id}/media)
+   * 3. Poll container status until FINISHED (GET /{container-id}?fields=status_code)
+   * 4. Publish container (POST /{ig-user-id}/media_publish)
+   * 5. Retrieve confirmed media permalink (GET /{media-id}?fields=id,permalink,shortcode)
+   * 6. Optional: Post first comment
    */
   async publishPost(
     account: ConnectedAccountData,
     payload: PostPublishPayload
   ): Promise<PublishResult> {
-    // 1. Idempotency Check
+    this.getCredentials();
+
+    if (account.isMock) {
+      throw new ProviderConfigurationError(
+        "INSTAGRAM",
+        "Mock accounts cannot be published via InstagramLiveProvider. Use InstagramMockProvider."
+      );
+    }
+
+    if (!account.accessToken) {
+      throw new ProviderConfigurationError(
+        "INSTAGRAM",
+        `Account ${account.id} is missing an access token for live Instagram publishing.`
+      );
+    }
+
     if (payload.idempotencyKey && this.idempotencyCache.has(payload.idempotencyKey)) {
       return this.idempotencyCache.get(payload.idempotencyKey)!;
     }
 
-    const isReel =
-      payload.mediaUrls.some((u) => u.includes(".mp4") || u.includes(".mov")) ||
-      payload.content.toLowerCase().includes("#reels");
+    const mediaUrl = payload.mediaUrls?.[0]?.trim();
+    if (!mediaUrl) {
+      throw new Error(
+        "Instagram publishing requires a valid media URL. Refusing to publish without media."
+      );
+    }
 
-    // If running in development sandbox or offline
-    if (!this.appId || !this.appSecret || account.isMock) {
-      const mediaId = "179" + Math.random().toString().slice(2, 17);
-      const shortcode = "C" + Math.random().toString(36).substring(2, 11);
-      const liveUrl = isReel
-        ? `https://www.instagram.com/reel/${shortcode}/`
-        : `https://www.instagram.com/p/${shortcode}/`;
-
-      const result: PublishResult = {
-        success: true,
-        platformPostId: mediaId,
-        liveUrl,
-        publishedAt: new Date(),
-      };
-
-      if (payload.idempotencyKey) {
-        this.idempotencyCache.set(payload.idempotencyKey, result);
-      }
-      return result;
+    if (!mediaUrl.startsWith("https://")) {
+      throw new Error(
+        `Instagram Graph API requires a publicly accessible HTTPS media URL (received: ${mediaUrl}). Configure S3/R2 public storage for live publishing.`
+      );
     }
 
     const igUserId = account.platformAccountId;
     const accessToken = account.accessToken;
 
-    if (!accessToken) {
-      throw new Error("Missing access token for Instagram publishing");
-    }
+    const lowerUrl = mediaUrl.toLowerCase();
+    const isVideo =
+      lowerUrl.endsWith(".mp4") ||
+      lowerUrl.endsWith(".mov") ||
+      payload.mediaMimeType?.startsWith("video/") ||
+      false;
 
-    // Step 1: Create container
-    const mediaUrl = payload.mediaUrls[0] || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe";
+    // Step 1: Create media container
     const containerParams = new URLSearchParams({
       access_token: accessToken,
       caption: payload.content,
     });
 
-    if (isReel) {
+    if (isVideo) {
       containerParams.set("media_type", "REELS");
       containerParams.set("video_url", mediaUrl);
     } else {
@@ -232,6 +306,7 @@ export class InstagramLiveProvider implements ISocialProvider {
       `https://graph.instagram.com/v21.0/${igUserId}/media`,
       {
         method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: containerParams,
       }
     );
@@ -242,9 +317,15 @@ export class InstagramLiveProvider implements ISocialProvider {
     }
 
     const containerData = await containerRes.json();
-    const creationId = containerData.id;
+    const creationId = containerData?.id ? String(containerData.id) : "";
+    if (!creationId) {
+      throw new Error("Instagram container creation did not return a valid container ID.");
+    }
 
-    // Step 2: Publish container
+    // Step 2: Poll container processing status until FINISHED
+    await this.waitForContainerReady(creationId, accessToken);
+
+    // Step 3: Publish the processed container
     const publishParams = new URLSearchParams({
       creation_id: creationId,
       access_token: accessToken,
@@ -254,6 +335,7 @@ export class InstagramLiveProvider implements ISocialProvider {
       `https://graph.instagram.com/v21.0/${igUserId}/media_publish`,
       {
         method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: publishParams,
       }
     );
@@ -264,32 +346,59 @@ export class InstagramLiveProvider implements ISocialProvider {
     }
 
     const publishData = await publishRes.json();
-    const publishedMediaId = publishData.id;
+    const publishedMediaId = publishData?.id ? String(publishData.id) : "";
+    if (!publishedMediaId) {
+      throw new Error("Instagram media_publish did not return a confirmed media ID.");
+    }
 
-    // Optional Step 3: Post first comment if configured (e.g. for hashtag reach)
+    // Step 4: Fetch the confirmed permalink from Instagram Graph API
+    const permalinkRes = await fetch(
+      `https://graph.instagram.com/v21.0/${publishedMediaId}?fields=id,permalink,shortcode,media_type&access_token=${encodeURIComponent(accessToken)}`
+    );
+
+    if (!permalinkRes.ok) {
+      const err = await permalinkRes.text();
+      throw new Error(
+        `Instagram media ${publishedMediaId} was published, but permalink confirmation failed (${permalinkRes.status}): ${err}`
+      );
+    }
+
+    const permalinkData = await permalinkRes.json();
+    const confirmedPermalink =
+      permalinkData.permalink ||
+      (permalinkData.shortcode
+        ? `https://www.instagram.com/${isVideo ? "reel" : "p"}/${permalinkData.shortcode}/`
+        : "");
+
+    if (!confirmedPermalink) {
+      throw new Error(
+        `Instagram Graph API did not return a permalink or shortcode for published media ${publishedMediaId}.`
+      );
+    }
+
+    // Step 5: Optional first comment
     if (payload.firstComment && payload.firstComment.trim()) {
-      try {
-        await fetch(`https://graph.instagram.com/v21.0/${publishedMediaId}/comments`, {
+      const commentRes = await fetch(
+        `https://graph.instagram.com/v21.0/${publishedMediaId}/comments`,
+        {
           method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             message: payload.firstComment,
             access_token: accessToken,
           }),
-        });
-      } catch (commentErr) {
-        console.warn("First comment posting failed, but main post succeeded:", commentErr);
+        }
+      );
+      if (!commentRes.ok) {
+        const errText = await commentRes.text();
+        console.warn(`First comment failed on media ${publishedMediaId}: ${errText}`);
       }
     }
-
-    const shortcode = "C" + Math.random().toString(36).substring(2, 11);
-    const liveUrl = isReel
-      ? `https://www.instagram.com/reel/${shortcode}/`
-      : `https://www.instagram.com/p/${shortcode}/`;
 
     const result: PublishResult = {
       success: true,
       platformPostId: publishedMediaId,
-      liveUrl,
+      liveUrl: confirmedPermalink,
       publishedAt: new Date(),
     };
 
@@ -301,69 +410,26 @@ export class InstagramLiveProvider implements ISocialProvider {
   }
 
   /**
-   * Fetches genuine insights from Instagram Graph API.
+   * Live analytics boundary: Refuses to return synthetic metrics disguised as live insights.
    */
-  async fetchInsights(_account: ConnectedAccountData, timeRange: TimeRange): Promise<SocialInsights> {
-    const startDate = timeRange.startDate.toISOString().slice(0, 10);
-    const endDate = timeRange.endDate.toISOString().slice(0, 10);
-
-    const dailyMetrics = [
-      {
-        date: startDate,
-        impressions: 6100,
-        reach: 5200,
-        engagements: 780,
-        likes: 620,
-        comments: 110,
-        shares: 50,
-        clicks: 85,
-      },
-      {
-        date: endDate,
-        impressions: 7400,
-        reach: 6300,
-        engagements: 920,
-        likes: 740,
-        comments: 130,
-        shares: 50,
-        clicks: 95,
-      },
-    ];
-
-    return {
-      platform: "INSTAGRAM",
-      totalImpressions: 13500,
-      totalReach: 11500,
-      totalEngagements: 1700,
-      totalFollowers: 84500,
-      followerGrowth: 120,
-      engagementRate: 12.59,
-      dailyMetrics,
-    };
+  async fetchInsights(account: ConnectedAccountData, _timeRange: TimeRange): Promise<SocialInsights> {
+    this.getCredentials();
+    if (account.isMock || !account.accessToken) {
+      throw new LiveAnalyticsNotSupportedError(
+        "INSTAGRAM",
+        "Live Instagram analytics requires a connected live account with a valid access token."
+      );
+    }
+    throw new LiveAnalyticsNotSupportedError(
+      "INSTAGRAM",
+      "Live Instagram insights ingestion is not enabled in Phase 6B. Use mock mode until Phase 6C analytics ingestion is activated."
+    );
   }
 
-  /**
-   * Returns viewer activity heatmap across 168 hourly slots.
-   */
   async fetchAudienceActivity(_account: ConnectedAccountData): Promise<AudienceHeatmapData> {
-    const cells = [];
-    for (let day = 0; day < 7; day++) {
-      for (let hour = 0; hour < 24; hour++) {
-        // Instagram peaks at lunch (12:00-13:00) and evening (19:00-22:00)
-        let score = 20;
-        if (hour >= 19 && hour <= 22) score = 90 + (hour % 8);
-        else if (hour >= 11 && hour <= 14) score = 70 + (hour % 10);
-        cells.push({ dayOfWeek: day, hour, activityScore: score });
-      }
-    }
-
-    return {
-      platform: "INSTAGRAM",
-      bestTimeSlots: [
-        { dayOfWeek: 3, hour: 20, label: "Wednesday at 8:00 PM (Highest Saves)" },
-        { dayOfWeek: 0, hour: 19, label: "Sunday at 7:00 PM (Reel Discovery)" },
-      ],
-      cells,
-    };
+    throw new LiveAnalyticsNotSupportedError(
+      "INSTAGRAM",
+      "Live Instagram audience activity heatmaps are not enabled in Phase 6B. Use mock mode for simulated heatmaps."
+    );
   }
 }

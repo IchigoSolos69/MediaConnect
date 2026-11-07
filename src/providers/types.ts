@@ -1,5 +1,23 @@
 export type SocialPlatform = "YOUTUBE" | "INSTAGRAM" | "X";
 
+export class ProviderConfigurationError extends Error {
+  public platform: SocialPlatform;
+  constructor(platform: SocialPlatform, message: string) {
+    super(message);
+    this.name = "ProviderConfigurationError";
+    this.platform = platform;
+  }
+}
+
+export class LiveAnalyticsNotSupportedError extends Error {
+  public platform: SocialPlatform;
+  constructor(platform: SocialPlatform, message: string) {
+    super(message);
+    this.name = "LiveAnalyticsNotSupportedError";
+    this.platform = platform;
+  }
+}
+
 export interface ConnectedAccountData {
   id: string;
   platform: SocialPlatform;
@@ -21,6 +39,9 @@ export interface PostPublishPayload {
   videoTitle?: string | null;
   videoTags?: string | null;
   idempotencyKey?: string | null;
+  mediaBuffer?: Buffer | null;
+  mediaMimeType?: string | null;
+  resumableSessionUri?: string | null;
 }
 
 export interface PublishResult {
@@ -29,6 +50,7 @@ export interface PublishResult {
   liveUrl: string;
   publishedAt: Date;
   error?: string;
+  resumableSessionUri?: string;
 }
 
 export interface AuthTokenResult {
@@ -84,8 +106,8 @@ export interface AudienceHeatmapData {
 
 export interface ISocialProvider {
   platform: SocialPlatform;
-  getAuthUrl(state: string): Promise<string>;
-  exchangeCode(code: string): Promise<AuthTokenResult>;
+  getAuthUrl(state: string, codeChallenge?: string): Promise<string>;
+  exchangeCode(code: string, codeVerifier?: string): Promise<AuthTokenResult>;
   refreshToken(token: string): Promise<AuthTokenResult>;
   publishPost(account: ConnectedAccountData, payload: PostPublishPayload): Promise<PublishResult>;
   fetchInsights(account: ConnectedAccountData, timeRange: TimeRange): Promise<SocialInsights>;

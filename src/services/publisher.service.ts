@@ -108,8 +108,7 @@ export class PublisherService {
 
     // 3. Compute deterministic idempotency key for provider reconciliation
     const idempotencyKey =
-      target.idempotencyKey ||
-      `pub_${target.id}_${target.createdAt.getTime()}_r${target.retryCount}`;
+      target.idempotencyKey || `pub_${target.id}_${target.createdAt.getTime()}`;
 
     await db.postTarget.update({
       where: { id: targetId },
@@ -135,13 +134,18 @@ export class PublisherService {
       videoTitle: target.videoTitle || target.post.title,
       videoTags: target.videoTags,
       idempotencyKey,
+      resumableSessionUri: target.resumableSessionUri,
     };
 
     // 4. Safely decrypt token just-in-time from vault envelope
     let decryptedAccessToken: string | null = null;
+    let decryptedRefreshToken: string | null = null;
     try {
       decryptedAccessToken = target.account.accessToken
         ? TokenVault.decrypt(target.account.accessToken, target.account.id)
+        : null;
+      decryptedRefreshToken = target.account.refreshToken
+        ? TokenVault.decrypt(target.account.refreshToken, target.account.id)
         : null;
     } catch (err: unknown) {
       const error = err as Error;
@@ -152,30 +156,147 @@ export class PublisherService {
         details: { error: error.message },
       });
       const nextRetry = target.retryCount + 1;
+      const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
           status: "FAILED",
           errorMessage: `Decryption error: ${error.message}`,
           retryCount: nextRetry,
+          nextRetryAt: new Date(Date.now() + backoffMs),
           leaseExpiresAt: null,
         },
       });
     }
 
+    // 5. Proactive Token Expiry Check & Refresh-and-Persist Workflow
+    const isTokenExpiredOrExpiring =
+      target.account.tokenExpiresAt !== null &&
+      target.account.tokenExpiresAt !== undefined &&
+      target.account.tokenExpiresAt.getTime() <= Date.now() + 5 * 60 * 1000;
+
+    const refreshAndPersistToken = async (): Promise<string> => {
+      const tokenToRefresh =
+        decryptedRefreshToken ||
+        (target.platform === "INSTAGRAM" ? decryptedAccessToken : null);
+
+      if (!tokenToRefresh) {
+        await db.account.update({
+          where: { id: target.account.id },
+          data: { status: "EXPIRED" },
+        });
+        throw new Error(
+          `Access token for account ${target.account.username} has expired and no refresh token is available.`
+        );
+      }
+
+      try {
+        const refreshed = await provider.refreshToken(tokenToRefresh);
+        const keyVersion = (target.account.tokenKeyVersion as "v1" | "v2") || "v1";
+        const newEncryptedAccess = TokenVault.encrypt(
+          refreshed.accessToken,
+          target.account.id,
+          keyVersion
+        );
+        const newRefreshRaw = refreshed.refreshToken || tokenToRefresh;
+        const newEncryptedRefresh = TokenVault.encrypt(
+          newRefreshRaw,
+          target.account.id,
+          keyVersion
+        );
+        const newExpiresAt = new Date(
+          Date.now() + (refreshed.expiresInSeconds || 3600) * 1000
+        );
+
+        await db.account.update({
+          where: { id: target.account.id },
+          data: {
+            accessToken: newEncryptedAccess,
+            refreshToken: newEncryptedRefresh,
+            tokenExpiresAt: newExpiresAt,
+            status: "ACTIVE",
+            updatedAt: new Date(),
+          },
+        });
+
+        decryptedAccessToken = refreshed.accessToken;
+        decryptedRefreshToken = newRefreshRaw;
+        return refreshed.accessToken;
+      } catch (refreshErr) {
+        const rErr = refreshErr as Error;
+        await db.account.update({
+          where: { id: target.account.id },
+          data: { status: "EXPIRED" },
+        });
+        throw new Error(`OAuth token refresh failed: ${rErr.message}`);
+      }
+    };
+
+    if (isTokenExpiredOrExpiring) {
+      try {
+        decryptedAccessToken = await refreshAndPersistToken();
+      } catch (refreshErr) {
+        const rErr = refreshErr as Error;
+        const nextRetry = target.retryCount + 1;
+        const exceeded = nextRetry >= target.maxRetries;
+        const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
+        return await db.postTarget.update({
+          where: { id: targetId },
+          data: {
+            status: "FAILED",
+            errorMessage: exceeded
+              ? `Maximum retries (${target.maxRetries}) exceeded: ${rErr.message}`
+              : rErr.message,
+            retryCount: nextRetry,
+            nextRetryAt: new Date(Date.now() + backoffMs),
+            leaseExpiresAt: null,
+          },
+        });
+      }
+    }
+
     try {
-      const result = await provider.publishPost(
-        {
-          id: target.account.id,
-          platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
-          platformAccountId: target.account.platformAccountId,
-          username: target.account.username,
-          displayName: target.account.displayName,
-          isMock: target.account.isMock,
-          accessToken: decryptedAccessToken,
-        },
-        payload
-      );
+      let result;
+      try {
+        result = await provider.publishPost(
+          {
+            id: target.account.id,
+            platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
+            platformAccountId: target.account.platformAccountId,
+            username: target.account.username,
+            displayName: target.account.displayName,
+            isMock: target.account.isMock,
+            accessToken: decryptedAccessToken,
+            refreshToken: decryptedRefreshToken,
+          },
+          payload
+        );
+      } catch (firstAttemptErr) {
+        const errMsg = (firstAttemptErr as Error).message || "";
+        // Reactive refresh if remote API rejected token with 401 and we haven't refreshed yet
+        if (
+          !isTokenExpiredOrExpiring &&
+          (errMsg.includes("(401)") || errMsg.toLowerCase().includes("unauthorized")) &&
+          (decryptedRefreshToken || target.platform === "INSTAGRAM")
+        ) {
+          const freshAccess = await refreshAndPersistToken();
+          result = await provider.publishPost(
+            {
+              id: target.account.id,
+              platform: target.platform as "YOUTUBE" | "INSTAGRAM" | "X",
+              platformAccountId: target.account.platformAccountId,
+              username: target.account.username,
+              displayName: target.account.displayName,
+              isMock: target.account.isMock,
+              accessToken: freshAccess,
+              refreshToken: decryptedRefreshToken,
+            },
+            payload
+          );
+        } else {
+          throw firstAttemptErr;
+        }
+      }
 
       if (result.success) {
         const updated = await db.postTarget.update({
@@ -184,8 +305,10 @@ export class PublisherService {
             status: "PUBLISHED",
             platformPostId: result.platformPostId,
             liveUrl: result.liveUrl,
+            resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
             publishedAt: result.publishedAt || new Date(),
             leaseExpiresAt: null, // Clear lease
+            nextRetryAt: null,
             errorMessage: null,
           },
         });
@@ -200,6 +323,7 @@ export class PublisherService {
       } else {
         const nextRetry = target.retryCount + 1;
         const exceeded = nextRetry >= target.maxRetries;
+        const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
         return await db.postTarget.update({
           where: { id: targetId },
           data: {
@@ -207,15 +331,18 @@ export class PublisherService {
             errorMessage: exceeded
               ? `Maximum retries (${target.maxRetries}) exceeded: ${result.error || "Publishing failed"}`
               : (result.error || "Publishing failed"),
+            resumableSessionUri: result.resumableSessionUri || target.resumableSessionUri,
             retryCount: nextRetry,
+            nextRetryAt: new Date(Date.now() + backoffMs),
             leaseExpiresAt: null, // Release lease so retry is possible
           },
         });
       }
     } catch (publishErr: unknown) {
-      const pErr = publishErr as Error;
+      const pErr = publishErr as Error & { resumableSessionUri?: string };
       const nextRetry = target.retryCount + 1;
       const exceeded = nextRetry >= target.maxRetries;
+      const backoffMs = Math.min(300_000, Math.pow(2, nextRetry) * 15_000);
       return await db.postTarget.update({
         where: { id: targetId },
         data: {
@@ -223,7 +350,9 @@ export class PublisherService {
           errorMessage: exceeded
             ? `Maximum retries (${target.maxRetries}) exceeded: ${pErr.message || "Provider runtime error"}`
             : (pErr.message || "Provider runtime error"),
+          resumableSessionUri: pErr.resumableSessionUri || target.resumableSessionUri,
           retryCount: nextRetry,
+          nextRetryAt: new Date(Date.now() + backoffMs),
           leaseExpiresAt: null,
         },
       });

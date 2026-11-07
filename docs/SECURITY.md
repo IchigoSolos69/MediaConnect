@@ -147,35 +147,41 @@ Therefore, MediaConnect adopts the industry-standard **At-Least-Once Delivery wi
 
 ## 7. Live Provider Architecture & OAuth 2.0 Security (Phase 6B)
 
-MediaConnect features a modular provider abstraction supporting both zero-cost local sandboxes and live social platform APIs:
+MediaConnect enforces a strict boundary between mock and live social provider adapters:
 
-1. **OAuth 2.0 Cryptographic State Protection:**
+1. **Zero Fake Success in Live Mode:**
+   - Live providers (`YouTubeLiveProvider`, `InstagramLiveProvider`, `XLiveProvider`) never return synthetic identities, random post IDs, placeholder URLs, or predetermined analytics.
+   - If required environment credentials (`YOUTUBE_CLIENT_ID`, `META_APP_ID`, `TWITTER_CLIENT_ID`) are missing, live adapters immediately fail closed with `ProviderConfigurationError`.
+
+2. **Persistent Single-Use OAuth State & PKCE S256:**
    - Authorization initiates at `/api/auth/connect/[provider]`.
-   - Generates a signed HMAC-SHA256 `state` parameter encapsulating `{ workspaceId, userId, platform, timestamp, nonce }`.
-   - Validated at `/api/auth/callback/[provider]` to guarantee:
-     - Anti-CSRF: The redirect matches the initiating browser session.
-     - Anti-Session Fixation: The redeeming user matches the state initiator.
-     - Tenant Integrity: Channel tokens are strictly bound to the authorized workspace.
-     - Replay Protection: 15-minute strict expiration window.
+   - Generates a random RFC 7636 PKCE `code_verifier` and S256 `code_challenge`, signs an HMAC-SHA256 `stateToken`, and persists the record in the `OAuthState` table (`isConsumed: false`, 15-minute TTL).
+   - At `/api/auth/callback/[provider]`, `consumeOAuthState()` verifies the HMAC signature, confirms the active user session matches the state initiator, and atomically marks `isConsumed = true` (`updateMany` where `isConsumed: false`). Any replay or duplicate callback is rejected with `OAuthStateError`.
 
-2. **Live Adapter Implementations:**
-   - **YouTube Data API v3 (`YouTubeLiveProvider`):** Google OAuth 2.0 with `youtube.upload` and `yt-analytics.readonly` scopes; chunked resumable upload protocol; daily upload quota tracker enforcing Google's 100 `videos.insert`/day limit.
-   - **Instagram Graph API (`InstagramLiveProvider`):** Direct Instagram Login for creator and business accounts (no Facebook Page linkage required); short-lived to long-lived (60-day) token exchange; 2-step media container flow (`POST /{ig-user-id}/media` $\rightarrow$ `POST /{ig-user-id}/media_publish`); first-comment auto-posting.
-   - **X API v2 Guardrail (`XLiveProvider`):** Strict consumption-based billing guardrail. Automatically blocks live post writes ($0.015/post) with `PaidApiGuardrailError` unless `ALLOW_PAID_X_API="true"` is explicitly provided.
-
-3. **Reconciliation & Idempotency:**
-   - Every dispatch generates a deterministic `idempotencyKey` cached by the provider adapters to guarantee idempotent delivery under network retries.
+3. **Live Adapter Protocols & Safeguards:**
+   - **YouTube Data API v3 (`YouTubeLiveProvider`):**
+     - Google OAuth 2.0 with PKCE S256 (`code_challenge` / `code_verifier`), `youtube.upload`, and `yt-analytics.readonly` scopes.
+     - Persistent database-backed quota manager (`PlatformQuota` table) enforcing Google's default 100 `videos.insert`/day limit across restarts.
+     - Complete resumable upload lifecycle: initiates `uploadType=resumable` session, streams binary MP4 chunks with `Content-Range` headers, persists `resumableSessionUri` on `PostTarget` across worker retries, recovers interrupted uploads via `Content-Range: bytes */total` (`308 Resume Incomplete` + `Range` header offset), and stores only the video ID confirmed by YouTube.
+   - **Instagram Graph API (`InstagramLiveProvider`):**
+     - Direct Instagram Login for professional accounts; upgrades short-lived codes to 60-day long-lived tokens with persisted `tokenExpiresAt`.
+     - Complete container lifecycle: validates public HTTPS media URLs (never substitutes placeholder media), creates container (`POST /{ig-user-id}/media`), polls container status (`GET /{container-id}?fields=status_code,status,error_message`) until `FINISHED` (aborting with `InstagramMediaProcessingError` on `ERROR`/`EXPIRED`), publishes (`POST /{ig-user-id}/media_publish`), and confirms the real permalink (`GET /{media-id}?fields=id,permalink,shortcode`).
+   - **X API v2 Guardrail (`XLiveProvider`):**
+     - Implements OAuth 2.0 PKCE S256 challenge/verifier.
+     - Strictly blocks live post creation (`PaidApiGuardrailError`) in Phase 6B to prevent consumption-based billing (~$0.015/post).
+   - **Scheduled Token Expiry & Refresh Persistence (`PublisherService`):**
+     - Before publishing any target whose `account.tokenExpiresAt` is expired or within 5 minutes of expiry (or upon receiving a reactive 401), `PublisherService` refreshes the token via `provider.refreshToken()`, re-encrypts the new access/refresh tokens in `TokenVault`, and persists the updated `tokenExpiresAt` to the database.
+   - **Live Analytics Boundary:**
+     - Live adapters refuse to return synthetic metrics or 168-hour heatmaps (`LiveAnalyticsNotSupportedError`) until live analytics ingestion is enabled in Phase 6C.
 
 ---
 
-## 8. Media Storage & Aspect Ratio Validation (Phase 6B)
+## 8. Media Storage & Binary Signature Validation (Phase 6B)
 
 1. **Storage Abstraction (`StorageService`):**
-   - Pluggable `IStorageProvider`: `LocalStorageProvider` for zero-cost development/test; `S3CompatibleStorageProvider` for Cloudflare R2 / AWS S3 production storage.
-   - Directory traversal protection: Storage keys are sanitized and prefixed with workspace UUIDs.
-2. **Technical Compliance & Aspect Ratio Rules:**
-   - Size limits: 100MB for video, 10MB for images.
-   - YouTube Shorts & Instagram Reels: Strictly enforces vertical 9:16 aspect ratio (~0.5625) with duration caps (60s Shorts, 90s Reels).
-   - YouTube Long-form: 16:9 widescreen recommended with pillarbox warnings for non-standard aspect ratios.
-   - Instagram Feed: 1:1 square, 4:5 portrait, and 1.91:1 landscape validation.
+   - `LocalStorageProvider`: Zero-cost local filesystem storage supporting `upload`, `read`, `head`, `delete`, and signed upload URLs with strict `path.resolve` boundary checks and tenant scope isolation (`assertTenantStorageScope`).
+   - `S3CompatibleStorageProvider`: Working AWS Signature Version 4 (`AWS4-HMAC-SHA256`) implementation performing real `PUT`, `GET`, `HEAD`, and `DELETE` HTTP operations and generating RFC-compliant presigned URLs against S3 / Cloudflare R2. Fails with `StorageConfigurationError` when unconfigured.
+2. **Binary Magic-Byte & Aspect Ratio Validation:**
+   - Inspects file magic bytes (`verifyFileSignature`) to ensure buffers match their claimed MIME type (`ftyp`/`moov` ISO BMFF headers for MP4/MOV, `FF D8 FF` for JPEG, PNG 8-byte header, GIF87a/89a, RIFF/WEBP). Arbitrary text or executables masquerading as media are rejected.
+   - Enforces size limits (100MB video, 10MB image) and platform aspect ratios (9:16 vertical for YouTube Shorts $\le 60\text{s}$ and Instagram Reels $\le 90\text{s}$).
 
