@@ -1,3 +1,4 @@
+import { db } from "@/lib/db";
 import { SeoService, SeoAnalysisResult } from "./seo.service";
 import { SocialPlatform } from "@/providers/types";
 
@@ -22,6 +23,7 @@ export interface AiSeoAssistantInput {
   content: string;
   topic?: string;
   targetPlatform?: SocialPlatform;
+  workspaceId?: string;
   allowHeuristicFallback?: boolean;
 }
 
@@ -86,8 +88,75 @@ function sanitizeUnsupportedViralityClaims(text: string): string {
 
 export class AiSeoService {
   /**
+   * Atomically checks and reserves 1 AI SEO request slot for the authorized workspace.
+   * Tracks daily usage in the persistent PlatformQuota table (platform: 'AI_SEO').
+   */
+  static async checkAndReserveAiQuota(
+    workspaceId: string,
+    limit = Number(process.env.AI_DAILY_QUOTA_LIMIT || 50),
+    now: Date = new Date()
+  ): Promise<{ allowed: boolean; remaining: number; used: number; limit: number }> {
+    if (!workspaceId) {
+      return { allowed: true, remaining: limit, used: 0, limit };
+    }
+    const dateStr = now.toISOString().slice(0, 10);
+    const platform = "AI_SEO";
+
+    await db.platformQuota.upsert({
+      where: {
+        platform_entityId_date: {
+          platform,
+          entityId: workspaceId,
+          date: dateStr,
+        },
+      },
+      update: {},
+      create: {
+        platform,
+        entityId: workspaceId,
+        date: dateStr,
+        limitCount: limit,
+        usedCount: 0,
+      },
+    });
+
+    const reserved = await db.platformQuota.updateMany({
+      where: {
+        platform,
+        entityId: workspaceId,
+        date: dateStr,
+        usedCount: { lt: limit },
+      },
+      data: {
+        usedCount: { increment: 1 },
+      },
+    });
+
+    const current = await db.platformQuota.findUnique({
+      where: {
+        platform_entityId_date: {
+          platform,
+          entityId: workspaceId,
+          date: dateStr,
+        },
+      },
+    });
+
+    const used = current?.usedCount ?? 0;
+    const remaining = Math.max(0, limit - used);
+
+    return {
+      allowed: reserved.count > 0,
+      remaining,
+      used,
+      limit,
+    };
+  }
+
+  /**
    * Resolves the active AI provider and configurable model identifier.
-   * Rejects retired models (such as gemini-2.0-flash) and defaults to heuristic fallback when no API key is configured.
+   * Rejects retired models (such as gemini-2.0-flash), requires ALLOW_EXTERNAL_AI="true" for third-party models,
+   * and defaults to heuristic fallback when external AI is disabled or unconfigured.
    */
   static resolveConfig(): AiAssistantConfig {
     const requestedModel = (
@@ -101,6 +170,14 @@ export class AiSeoService {
         requestedModel,
         `Configured AI model '${requestedModel}' has been shut down / retired. Set AI_MODEL to a currently supported model (e.g., 'gemini-2.5-flash' or 'gpt-4o-mini').`
       );
+    }
+
+    // Guardrail: External paid AI APIs must be explicitly allowed via ALLOW_EXTERNAL_AI=true
+    if (process.env.ALLOW_EXTERNAL_AI !== "true") {
+      return {
+        provider: "heuristic",
+        model: "local-heuristic-v1",
+      };
     }
 
     const explicitProvider = (process.env.AI_PROVIDER || "").trim().toLowerCase();
@@ -258,6 +335,24 @@ export class AiSeoService {
   static async generateSuggestions(
     input: AiSeoAssistantInput
   ): Promise<AiSeoAssistantResult> {
+    if (input.content && input.content.length > 5000) {
+      throw new Error("Input content exceeds maximum allowed length of 5000 characters.");
+    }
+
+    if (input.workspaceId) {
+      const quota = await this.checkAndReserveAiQuota(input.workspaceId);
+      if (!quota.allowed) {
+        if (input.allowHeuristicFallback !== false) {
+          const fb = this.generateHeuristicFallback(input);
+          fb.contentSuggestions.unshift(
+            "Notice: Daily AI request quota reached for this workspace. Free local heuristic suggestions were generated."
+          );
+          return fb;
+        }
+        throw new Error("Daily AI SEO request quota exceeded for this workspace.");
+      }
+    }
+
     const config = this.resolveConfig();
     if (config.provider === "heuristic" || !config.apiKey) {
       return this.generateHeuristicFallback(input);
@@ -302,6 +397,7 @@ export class AiSeoService {
         const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(10_000),
           body: JSON.stringify({
             systemInstruction: { parts: [{ text: systemPrompt }] },
             contents: [{ role: "user", parts: [{ text: userPrompt }] }],
@@ -326,6 +422,7 @@ export class AiSeoService {
             Authorization: `Bearer ${config.apiKey}`,
             "Content-Type": "application/json",
           },
+          signal: AbortSignal.timeout(10_000),
           body: JSON.stringify({
             model: config.model,
             messages: [
@@ -352,6 +449,7 @@ export class AiSeoService {
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
           },
+          signal: AbortSignal.timeout(10_000),
           body: JSON.stringify({
             model: config.model,
             max_tokens: 1024,

@@ -35,10 +35,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (content.length > 5000) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Input content exceeds maximum allowed length of 5000 characters.",
+        },
+        { status: 400 }
+      );
+    }
+
     const result = await AiSeoService.generateSuggestions({
       content,
       topic,
       targetPlatform,
+      workspaceId: targetWorkspaceId,
       allowHeuristicFallback,
     });
 
@@ -51,6 +62,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: error.message, model: error.model },
         { status: 400 }
+      );
+    }
+    if (error instanceof Error && error.message.includes("quota exceeded")) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: 429 }
       );
     }
     return handleAuthApiError(error);

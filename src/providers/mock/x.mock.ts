@@ -18,7 +18,7 @@ export class XMockProvider implements ISocialProvider {
     return `/api/auth/mock-callback?platform=X&state=${state}`;
   }
 
-  async exchangeCode(code: string): Promise<AuthTokenResult> {
+  async exchangeCode(_code: string): Promise<AuthTokenResult> {
     return {
       accessToken: "mock_x_access_token_" + Math.random().toString(36).substring(7),
       refreshToken: "mock_x_refresh_token_" + Math.random().toString(36).substring(7),
@@ -61,8 +61,8 @@ export class XMockProvider implements ISocialProvider {
   }
 
   async fetchInsights(
-    account: ConnectedAccountData,
-    timeRange: TimeRange
+    _account: ConnectedAccountData,
+    _timeRange: TimeRange
   ): Promise<SocialInsights> {
     const days = 14;
     const dailyMetrics = [];
@@ -109,7 +109,7 @@ export class XMockProvider implements ISocialProvider {
     };
   }
 
-  async fetchAudienceActivity(account: ConnectedAccountData): Promise<AudienceHeatmapData> {
+  async fetchAudienceActivity(_account: ConnectedAccountData): Promise<AudienceHeatmapData> {
     const cells = [];
     // X peaks during morning news rush (8-10am) and mid-afternoon (1-4pm) Mon-Fri
     for (let day = 0; day < 7; day++) {

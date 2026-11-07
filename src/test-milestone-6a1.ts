@@ -1,12 +1,9 @@
 import { db } from "./lib/db";
 import { getAuthSecret, getTokenVaultKey, getDispatchSecret, ConfigError } from "./lib/config/secrets";
 import { TokenVault, PlaintextTokenRejectedError } from "./lib/crypto/vault";
-import { createSessionToken, verifySessionToken, SESSION_COOKIE_NAME } from "./lib/auth/session";
-import { authorizeWorkspaceAccess, ForbiddenError, AuthError, sanitizeAccount } from "./lib/auth/server";
-import { hasPermission } from "./lib/auth/permissions";
+import { createSessionToken, SESSION_COOKIE_NAME } from "./lib/auth/session";
+import { sanitizeAccount } from "./lib/auth/server";
 import { PublisherService, UnapprovedPostError } from "./services/publisher.service";
-import { loginRateLimiter } from "./lib/security/rate-limiter";
-import bcrypt from "bcryptjs";
 import { NextRequest } from "next/server";
 import { POST as loginRoute } from "./app/api/auth/login/route";
 import { POST as dispatchRoute } from "./app/api/posts/dispatch/route";

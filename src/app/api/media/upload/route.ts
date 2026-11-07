@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import {
   authenticateRequest,
@@ -16,8 +15,68 @@ import {
 } from "@/services/storage.service";
 import { SocialPlatform } from "@/providers/types";
 
+const MAX_MEDIA_BYTES = 100 * 1024 * 1024; // 100 MB limit
+
+async function readBoundedBuffer(
+  req: NextRequest,
+  maxBytes = MAX_MEDIA_BYTES,
+  timeoutMs = 30_000
+): Promise<Buffer> {
+  if (!req.body) {
+    return Buffer.alloc(0);
+  }
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  let timerId: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(new Error(`Upload stream timed out after ${timeoutMs / 1000} seconds.`));
+    }, timeoutMs);
+  });
+
+  const readStream = async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          totalBytes += value.byteLength;
+          if (totalBytes > maxBytes) {
+            await reader.cancel();
+            throw new StorageSecurityError(
+              `Upload stream exceeded maximum allowed limit of ${maxBytes} bytes.`
+            );
+          }
+          chunks.push(value);
+        }
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      if (timerId) clearTimeout(timerId);
+    }
+  };
+
+  return await Promise.race([readStream(), timeoutPromise]);
+}
+
 export async function POST(request: NextRequest) {
   try {
+    const contentLength = request.headers.get("content-length");
+    if (contentLength) {
+      const declaredBytes = parseInt(contentLength, 10);
+      if (Number.isFinite(declaredBytes) && declaredBytes > MAX_MEDIA_BYTES) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Payload too large. Declared size (${declaredBytes} bytes) exceeds maximum limit (${MAX_MEDIA_BYTES} bytes).`,
+          },
+          { status: 413 }
+        );
+      }
+    }
+
     const session = await authenticateRequest(request);
     const contentType = request.headers.get("content-type") || "";
 
@@ -38,6 +97,16 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(
           { success: false, error: "Multipart form-data must include a 'file' field." },
           { status: 400 }
+        );
+      }
+
+      if (file.size > MAX_MEDIA_BYTES) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `File size (${file.size} bytes) exceeds maximum allowed limit (${MAX_MEDIA_BYTES} bytes).`,
+          },
+          { status: 413 }
         );
       }
 
@@ -70,6 +139,15 @@ export async function POST(request: NextRequest) {
         );
       }
       buffer = Buffer.from(String(body.base64Data), "base64");
+      if (buffer.length > MAX_MEDIA_BYTES) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Decoded base64 data (${buffer.length} bytes) exceeds maximum allowed limit (${MAX_MEDIA_BYTES} bytes).`,
+          },
+          { status: 413 }
+        );
+      }
       filename = String(body.filename);
       mimeType = String(body.mimeType);
       requestedWorkspaceId = body.workspaceId || requestedWorkspaceId;
@@ -79,8 +157,7 @@ export async function POST(request: NextRequest) {
       height = body.height;
       durationSeconds = body.durationSeconds;
     } else {
-      const arrayBuf = await request.arrayBuffer();
-      buffer = Buffer.from(arrayBuf);
+      buffer = await readBoundedBuffer(request, MAX_MEDIA_BYTES);
       filename = request.headers.get("x-filename") || "upload.bin";
       mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
     }
@@ -135,6 +212,20 @@ export async function POST(request: NextRequest) {
  */
 export async function PUT(request: NextRequest) {
   try {
+    const contentLength = request.headers.get("content-length");
+    if (contentLength) {
+      const declaredBytes = parseInt(contentLength, 10);
+      if (Number.isFinite(declaredBytes) && declaredBytes > MAX_MEDIA_BYTES) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Payload too large. Declared size (${declaredBytes} bytes) exceeds maximum limit (${MAX_MEDIA_BYTES} bytes).`,
+          },
+          { status: 413 }
+        );
+      }
+    }
+
     const session = await authenticateRequest(request);
     const { searchParams } = new URL(request.url);
     const key = searchParams.get("key") || "";
@@ -180,8 +271,7 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const arrayBuf = await request.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
+    const buffer = await readBoundedBuffer(request, MAX_MEDIA_BYTES);
     const mimeType =
       request.headers.get("content-type")?.split(";")[0].trim() || "video/mp4";
 
@@ -193,10 +283,9 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const filename = path.basename(normalizedKey);
-    const uploadResult = await StorageService.uploadMedia(
+    const uploadResult = await StorageService.writeMedia(
+      normalizedKey,
       buffer,
-      filename,
       mimeType,
       membership.workspaceId
     );

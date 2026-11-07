@@ -11,7 +11,8 @@
     "test:security": "tsx src/test-milestone-6a2.ts",
     "test:phase6b": "tsx src/test-phase-6b.ts",
     "test:phase6c": "tsx src/test-phase-6c.ts",
-    "test": "tsx src/test-token-vault.ts && tsx src/test-milestone-6a2.ts && tsx src/test-phase-6b.ts && tsx src/test-phase-6c.ts"
+    "test:phase6d": "tsx src/test-phase-6d.ts",
+    "test": "tsx src/test-token-vault.ts && tsx src/test-milestone-6a2.ts && tsx src/test-phase-6b.ts && tsx src/test-phase-6c.ts && tsx src/test-phase-6d.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

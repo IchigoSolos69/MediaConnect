@@ -49,14 +49,14 @@ export const METRIC_DEFINITIONS: ReportMetricDefinition[] = [
     definition:
       "Total number of times content was displayed or viewed across connected channels during the selected date window.",
     availabilityNote:
-      "Reported by YouTube Analytics API v2 (views) and Instagram Graph API (impressions). Disabled for paid X API.",
+      "Reported by YouTube Analytics API v2 (views) and Instagram Graph API (views/impressions). Disabled for paid X API.",
   },
   {
-    metric: "Unique Reach",
+    metric: "Aggregated Daily Reach (Non-Deduplicated)",
     definition:
-      "Distinct user accounts that viewed content at least once during the reporting period.",
+      "Sum of daily reach reported across connected channels. Underlying social platform APIs do not support cross-platform or multi-day unique viewer deduplication.",
     availabilityNote:
-      "Provided by Instagram Graph API daily reach. Marked UNAVAILABLE for YouTube daily channel reports.",
+      "Provided by Instagram Graph API daily reach. Marked UNAVAILABLE for YouTube daily channel reports. Not deduplicated across channels or dates.",
   },
   {
     metric: "Total Engagements",
@@ -88,38 +88,160 @@ function escapePdfText(input: string): string {
     .replace(/\)/g, "\\)");
 }
 
+function wrapPdfText(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+  const words = text.split(" ");
+  const result: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (!current) {
+      if (word.length > maxChars) {
+        for (let i = 0; i < word.length; i += maxChars) {
+          result.push(word.slice(i, i + maxChars));
+        }
+      } else {
+        current = word;
+      }
+    } else if (current.length + 1 + word.length <= maxChars) {
+      current += ` ${word}`;
+    } else {
+      result.push(current);
+      if (word.length > maxChars) {
+        for (let i = 0; i < word.length; i += maxChars) {
+          result.push(word.slice(i, i + maxChars));
+        }
+        current = "";
+      } else {
+        current = word;
+      }
+    }
+  }
+  if (current) {
+    result.push(current);
+  }
+  return result;
+}
+
+interface FormattedLine {
+  text: string;
+  bold: boolean;
+  size: number;
+  indent: number;
+  leading: number;
+}
+
 /**
- * Generates a standards-compliant PDF 1.4 binary document from structured text lines.
+ * Generates a standards-compliant multi-page PDF 1.4 binary document from structured text lines.
+ * Wraps overflowing text, paginates dynamically, emits valid /Page objects linked into /Pages,
+ * and numbers every page without clipping lines.
  */
 function buildPdf14Binary(
   lines: Array<{ text: string; bold?: boolean; size?: number; indent?: number }>
 ): Buffer {
-  const streamOps: string[] = ["BT"];
-  let currentY = 755;
-
+  const formattedLines: FormattedLine[] = [];
   for (const line of lines) {
-    if (currentY < 40) break;
-    const font = line.bold ? "/F2" : "/F1";
     const size = line.size || 9;
-    const x = 42 + (line.indent || 0);
-    streamOps.push(`${font} ${size} Tf`);
-    streamOps.push(`1 0 0 1 ${x} ${currentY} Tm`);
-    streamOps.push(`(${escapePdfText(line.text)}) Tj`);
-    currentY -= size + 5;
+    const indent = line.indent || 0;
+    const bold = Boolean(line.bold);
+    const usableWidth = 528 - indent;
+    const charWidth = 0.52 * size;
+    const maxChars = Math.max(20, Math.floor(usableWidth / charWidth));
+    const chunks = wrapPdfText(line.text, maxChars);
+    for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
+      formattedLines.push({
+        text: chunks[cIdx],
+        bold,
+        size,
+        indent: cIdx === 0 ? indent : indent + 8,
+        leading: size + 4,
+      });
+    }
   }
-  streamOps.push("ET");
 
-  const contentStream = streamOps.join("\n");
-  const contentLength = Buffer.byteLength(contentStream, "utf8");
+  const pages: FormattedLine[][] = [];
+  let currentPage: FormattedLine[] = [];
+  let currentY = 740;
+  const BOTTOM_MARGIN = 55;
+
+  for (const line of formattedLines) {
+    if (currentY - line.leading < BOTTOM_MARGIN && currentPage.length > 0) {
+      pages.push(currentPage);
+      currentPage = [];
+      currentY = 740;
+    }
+    currentPage.push(line);
+    currentY -= line.leading;
+  }
+  if (currentPage.length > 0) {
+    pages.push(currentPage);
+  }
+  if (pages.length === 0) {
+    pages.push([]);
+  }
+
+  const totalPages = pages.length;
+  const pageStreams: string[] = [];
+
+  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+    const pLines = pages[pIdx];
+    const streamOps: string[] = ["BT"];
+
+    if (pIdx > 0) {
+      streamOps.push("/F2 8 Tf");
+      streamOps.push("1 0 0 1 42 760 Tm");
+      streamOps.push(
+        `(${escapePdfText("MediaConnect Executive Performance Report (Continued)")}) Tj`
+      );
+    }
+
+    let y = 740;
+    for (const item of pLines) {
+      const font = item.bold ? "/F2" : "/F1";
+      const x = 42 + item.indent;
+      streamOps.push(`${font} ${item.size} Tf`);
+      streamOps.push(`1 0 0 1 ${x} ${y} Tm`);
+      streamOps.push(`(${escapePdfText(item.text)}) Tj`);
+      y -= item.leading;
+    }
+
+    // Page footer
+    streamOps.push("/F1 8 Tf");
+    streamOps.push("1 0 0 1 42 38 Tm");
+    streamOps.push(
+      `(${escapePdfText(
+        `Page ${pIdx + 1} of ${totalPages} | Confidential - MediaConnect Enterprise Analytics`
+      )}) Tj`
+    );
+
+    streamOps.push("ET");
+    pageStreams.push(streamOps.join("\n"));
+  }
+
+  const kidsRefs = Array.from(
+    { length: totalPages },
+    (_, idx) => `${5 + 2 * idx} 0 R`
+  ).join(" ");
 
   const objects: string[] = [
     "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n",
-    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-    "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n",
-    `6 0 obj\n<< /Length ${contentLength} >>\nstream\n${contentStream}\nendstream\nendobj\n`,
+    `2 0 obj\n<< /Type /Pages /Kids [${kidsRefs}] /Count ${totalPages} >>\nendobj\n`,
+    "3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n",
   ];
+
+  for (let i = 0; i < totalPages; i++) {
+    const pageObjId = 5 + 2 * i;
+    const contentObjId = 5 + 2 * i + 1;
+    const content = pageStreams[i];
+    const len = Buffer.byteLength(content, "utf8");
+
+    objects.push(
+      `${pageObjId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjId} 0 R >>\nendobj\n`
+    );
+    objects.push(
+      `${contentObjId} 0 obj\n<< /Length ${len} >>\nstream\n${content}\nendstream\nendobj\n`
+    );
+  }
 
   const header = "%PDF-1.4\n";
   const offsets: number[] = [];
@@ -198,6 +320,9 @@ export class ReportService {
         );
       }
     }
+    unavailableDisclosures.push(
+      "Reach Semantics: Cross-platform and multi-day unique viewer deduplication is not supported by underlying social platform APIs. Total reach represents non-deduplicated daily aggregated reach."
+    );
     if (unavailableDisclosures.length === 0) {
       unavailableDisclosures.push(
         "All reported metrics are available from the active workspace data source."
@@ -262,7 +387,7 @@ export class ReportService {
       { text: "--------------------------------------------------------------------------------", size: 8 },
       { text: "1. EXECUTIVE KPI SUMMARY", bold: true, size: 10 },
       {
-        text: `Total Impressions: ${metadata.summary.totalImpressions} | Unique Reach: ${metadata.summary.totalReach}`,
+        text: `Total Impressions: ${metadata.summary.totalImpressions} | Daily Reach (Non-Dedup): ${metadata.summary.totalReach}`,
         indent: 10,
         size: 9,
       },
@@ -306,6 +431,24 @@ export class ReportService {
           indent: 16,
           size: 8,
         });
+      }
+
+      if (overview.accounts && overview.accounts.length > 0) {
+        pdfLines.push({
+          text: "Connected Account Breakdowns:",
+          bold: true,
+          indent: 8,
+          size: 9,
+        });
+        for (const acc of overview.accounts) {
+          pdfLines.push({
+            text: `@${acc.username} (${acc.platform}) - Audience: ${acc.followers.toLocaleString("en-US")} | Impressions: ${
+              acc.impressions !== null ? acc.impressions.toLocaleString("en-US") : "UNAVAILABLE"
+            } | Status: ${acc.syncStatus}`,
+            indent: 16,
+            size: 8,
+          });
+        }
       }
     }
 

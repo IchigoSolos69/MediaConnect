@@ -889,7 +889,7 @@ async function runPhase6CTestSuite() {
           });
         }
 
-        if (urlStr.includes("/17841407777/insights") && urlStr.includes("metric=reach")) {
+        if (urlStr.includes("/17841407777/insights") && !urlStr.includes("online_followers")) {
           return Response.json({
             data: [
               {
@@ -1015,6 +1015,7 @@ async function runPhase6CTestSuite() {
       delete process.env.AI_MODEL;
       process.env.AI_PROVIDER = "gemini";
       process.env.GEMINI_API_KEY = "test_gemini_key_6c";
+      process.env.ALLOW_EXTERNAL_AI = "true";
 
       let requestedModelUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {

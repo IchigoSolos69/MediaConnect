@@ -63,6 +63,9 @@ jobs:
       - name: Run Phase 6C Authorization, Analytics, AI SEO & PDF Suite
         run: npx tsx src/test-phase-6c.ts
 
+      - name: Run Phase 6D Pre-Launch Validation & Corrections Suite
+        run: npx tsx src/test-phase-6d.ts
+
       - name: TypeScript Type Check
         run: npx tsc --noEmit
 

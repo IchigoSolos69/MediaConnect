@@ -69,6 +69,12 @@ export interface IStorageProvider {
     mimeType: string,
     workspaceId: string
   ): Promise<StorageUploadResult>;
+  write(
+    storageKey: string,
+    buffer: Buffer,
+    mimeType: string,
+    workspaceId: string
+  ): Promise<StorageUploadResult>;
   read(storageKey: string, workspaceId: string): Promise<Buffer>;
   head(storageKey: string, workspaceId: string): Promise<StorageHeadResult>;
   delete(storageKey: string, workspaceId: string): Promise<boolean>;
@@ -435,6 +441,33 @@ export class LocalStorageProvider implements IStorageProvider {
     };
   }
 
+  async write(
+    storageKey: string,
+    buffer: Buffer,
+    mimeType: string,
+    workspaceId: string
+  ): Promise<StorageUploadResult> {
+    const normalizedKey = assertTenantStorageScope(storageKey, workspaceId);
+    const fullPath = this.resolveSafePath(normalizedKey, workspaceId);
+    const parentDir = path.dirname(fullPath);
+
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+
+    await fs.promises.writeFile(fullPath, buffer);
+    const etag = crypto.createHash("md5").update(buffer).digest("hex");
+
+    return {
+      storageKey: normalizedKey,
+      publicUrl: this.getPublicUrl(normalizedKey),
+      sizeBytes: buffer.length,
+      mimeType,
+      etag,
+      createdAt: new Date(),
+    };
+  }
+
   async read(storageKey: string, workspaceId: string): Promise<Buffer> {
     const fullPath = this.resolveSafePath(storageKey, workspaceId);
     if (!fs.existsSync(fullPath)) {
@@ -661,6 +694,38 @@ export class S3CompatibleStorageProvider implements IStorageProvider {
     };
   }
 
+  async write(
+    storageKey: string,
+    buffer: Buffer,
+    mimeType: string,
+    workspaceId: string
+  ): Promise<StorageUploadResult> {
+    this.assertConfigured();
+    const normalizedKey = assertTenantStorageScope(storageKey, workspaceId);
+    const { url, headers } = this.buildSignedRequest("PUT", normalizedKey, buffer, mimeType);
+
+    const res = await fetch(url, {
+      method: "PUT",
+      headers,
+      body: new Uint8Array(buffer),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`S3/R2 direct PUT failed (${res.status}): ${errText}`);
+    }
+
+    const etag = res.headers.get("etag")?.replace(/"/g, "") || sha256Hex(buffer);
+    return {
+      storageKey: normalizedKey,
+      publicUrl: this.getPublicUrl(normalizedKey),
+      sizeBytes: buffer.length,
+      mimeType,
+      etag,
+      createdAt: new Date(),
+    };
+  }
+
   async read(storageKey: string, workspaceId: string): Promise<Buffer> {
     this.assertConfigured();
     const normalized = assertTenantStorageScope(storageKey, workspaceId);
@@ -728,7 +793,7 @@ export class S3CompatibleStorageProvider implements IStorageProvider {
 
   async getPresignedUploadUrl(
     storageKey: string,
-    _mimeType: string,
+    mimeType: string,
     workspaceId: string,
     expiresInSeconds = 900
   ): Promise<string> {
@@ -748,23 +813,28 @@ export class S3CompatibleStorageProvider implements IStorageProvider {
       .join("/");
     const canonicalUri = `${basePath}/${encodeURIComponent(this.bucket)}/${encodedKey}`;
 
+    const hasMime = Boolean(mimeType && mimeType.trim());
+    const signedHeaders = hasMime ? "content-type;host" : "host";
+
     const queryParams = new URLSearchParams({
       "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
       "X-Amz-Credential": `${this.accessKeyId}/${credentialScope}`,
       "X-Amz-Date": amzDate,
       "X-Amz-Expires": String(expiresInSeconds),
-      "X-Amz-SignedHeaders": "host",
+      "X-Amz-SignedHeaders": signedHeaders,
     });
     queryParams.sort();
 
     const canonicalQueryString = queryParams.toString();
-    const canonicalHeaders = `host:${parsedEndpoint.host}\n`;
+    const canonicalHeaders = hasMime
+      ? `content-type:${mimeType.trim()}\nhost:${parsedEndpoint.host}\n`
+      : `host:${parsedEndpoint.host}\n`;
     const canonicalRequest = [
       "PUT",
       canonicalUri,
       canonicalQueryString,
       canonicalHeaders,
-      "host",
+      signedHeaders,
       "UNSIGNED-PAYLOAD",
     ].join("\n");
 
@@ -951,5 +1021,70 @@ export class StorageService {
 
     const provider = this.getProvider();
     return await provider.upload(buffer, filename, mimeType, workspaceId);
+  }
+
+  /**
+   * Directly writes media to an explicitly authorized, presigned storage key.
+   * Validates file signature, MIME type, dimensions, and size before persisting to the exact key.
+   */
+  static async writeMedia(
+    storageKey: string,
+    buffer: Buffer,
+    mimeType: string,
+    workspaceId: string,
+    validationInput?: Partial<MediaValidationInput>
+  ): Promise<StorageUploadResult> {
+    const filename = path.basename(storageKey);
+    const validation = this.validateMedia({
+      filename,
+      mimeType,
+      sizeBytes: buffer.length,
+      buffer,
+      ...validationInput,
+    });
+
+    if (!validation.isValid) {
+      throw new MediaValidationError(
+        `Media validation failed: ${validation.errors.join(", ")}`,
+        validation.errors
+      );
+    }
+
+    const provider = this.getProvider();
+    return await provider.write(storageKey, buffer, mimeType, workspaceId);
+  }
+
+  /**
+   * Verifies an uploaded object in storage before marking it usable or attaching to a post.
+   * Confirms existence, non-empty and bounded size, and expected MIME type.
+   */
+  static async verifyUploadedMedia(
+    storageKey: string,
+    workspaceId: string,
+    expectedMimeType: string,
+    maxBytes = 100 * 1024 * 1024
+  ): Promise<StorageHeadResult> {
+    const head = await this.getProvider().head(storageKey, workspaceId);
+    if (!head.exists) {
+      throw new StorageSecurityError(`Uploaded media verification failed: object '${storageKey}' does not exist.`);
+    }
+    if (head.sizeBytes <= 0) {
+      throw new StorageSecurityError(`Uploaded media verification failed: object '${storageKey}' is empty (0 bytes).`);
+    }
+    if (head.sizeBytes > maxBytes) {
+      throw new StorageSecurityError(
+        `Uploaded media verification failed: size (${head.sizeBytes} bytes) exceeds maximum allowed limit (${maxBytes} bytes).`
+      );
+    }
+    if (
+      head.contentType &&
+      head.contentType !== expectedMimeType &&
+      head.contentType !== "application/octet-stream"
+    ) {
+      throw new StorageSecurityError(
+        `Uploaded media verification failed: content-type '${head.contentType}' does not match expected '${expectedMimeType}'.`
+      );
+    }
+    return head;
   }
 }

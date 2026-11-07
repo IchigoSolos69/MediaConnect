@@ -18,7 +18,7 @@ export class InstagramMockProvider implements ISocialProvider {
     return `/api/auth/mock-callback?platform=INSTAGRAM&state=${state}`;
   }
 
-  async exchangeCode(code: string): Promise<AuthTokenResult> {
+  async exchangeCode(_code: string): Promise<AuthTokenResult> {
     return {
       accessToken: "mock_ig_access_token_" + Math.random().toString(36).substring(7),
       refreshToken: "mock_ig_refresh_token_" + Math.random().toString(36).substring(7),
@@ -61,8 +61,8 @@ export class InstagramMockProvider implements ISocialProvider {
   }
 
   async fetchInsights(
-    account: ConnectedAccountData,
-    timeRange: TimeRange
+    _account: ConnectedAccountData,
+    _timeRange: TimeRange
   ): Promise<SocialInsights> {
     const days = 14;
     const dailyMetrics = [];
@@ -109,7 +109,7 @@ export class InstagramMockProvider implements ISocialProvider {
     };
   }
 
-  async fetchAudienceActivity(account: ConnectedAccountData): Promise<AudienceHeatmapData> {
+  async fetchAudienceActivity(_account: ConnectedAccountData): Promise<AudienceHeatmapData> {
     const cells = [];
     // Instagram peaks midday (12-2pm) and evening (7-9pm)
     for (let day = 0; day < 7; day++) {

@@ -34,6 +34,13 @@ export interface PlatformBreakdownItem {
   reportingDelayHours: number | null;
 }
 
+export interface AccountBreakdownItem extends PlatformBreakdownItem {
+  accountId: string;
+  username: string;
+  displayName: string | null;
+  platform: string;
+}
+
 export interface AggregatedMetrics {
   workspaceId: string;
   workspaceName: string;
@@ -46,11 +53,15 @@ export interface AggregatedMetrics {
   unavailableMetrics: string[];
   totalImpressions: number;
   totalReach: number;
+  reachLabel: string;
+  reachDisclosure: string;
   totalEngagements: number;
   totalFollowers: number;
   followerGrowth: number | null;
   engagementRate: number;
   byPlatform: Record<string, PlatformBreakdownItem>;
+  byAccount: Record<string, AccountBreakdownItem>;
+  accounts: AccountBreakdownItem[];
   dailyTimeline: Array<{
     date: string;
     impressions: number;
@@ -494,6 +505,8 @@ export class AnalyticsService {
     let hasValidFollowerGrowth = false;
 
     const byPlatform: Record<string, PlatformBreakdownItem> = {};
+    const byAccount: Record<string, AccountBreakdownItem> = {};
+    const accountsList: AccountBreakdownItem[] = [];
     const dailyMap: Record<
       string,
       { impressions: number; reach: number; engagements: number; clicks: number; source: string }
@@ -502,6 +515,81 @@ export class AnalyticsService {
     const workspaceUnavailableMetrics = new Set<string>();
     const sourcesSeen = new Set<DataSourceLabel>();
     let latestSyncDate: Date | null = null;
+
+    const mergeIntoPlatformBreakdown = (
+      existing: PlatformBreakdownItem | undefined,
+      incoming: PlatformBreakdownItem
+    ): PlatformBreakdownItem => {
+      if (!existing) {
+        return { ...incoming };
+      }
+      const combinedImpressions =
+        existing.impressions !== null || incoming.impressions !== null
+          ? (existing.impressions || 0) + (incoming.impressions || 0)
+          : null;
+      const combinedReach =
+        existing.reach !== null || incoming.reach !== null
+          ? (existing.reach || 0) + (incoming.reach || 0)
+          : null;
+      const combinedEngagements =
+        existing.engagements !== null || incoming.engagements !== null
+          ? (existing.engagements || 0) + (incoming.engagements || 0)
+          : null;
+      const combinedFollowers = existing.followers + incoming.followers;
+      const combinedFollowerGrowth =
+        existing.followerGrowth !== null || incoming.followerGrowth !== null
+          ? (existing.followerGrowth || 0) + (incoming.followerGrowth || 0)
+          : null;
+      const combinedPostsCount = existing.postsCount + incoming.postsCount;
+      const combinedEngagementRate =
+        combinedImpressions !== null && combinedImpressions > 0
+          ? Number((((combinedEngagements || 0) / combinedImpressions) * 100).toFixed(2))
+          : null;
+      const isMock = existing.isMock && incoming.isMock;
+      const source: DataSourceLabel =
+        existing.source === incoming.source ? existing.source : "MIXED";
+      const syncStatus =
+        existing.syncStatus === "ERROR" || incoming.syncStatus === "ERROR"
+          ? "ERROR"
+          : existing.syncStatus === "RATE_LIMITED" || incoming.syncStatus === "RATE_LIMITED"
+          ? "RATE_LIMITED"
+          : existing.syncStatus === "UNSUPPORTED_PAID" || incoming.syncStatus === "UNSUPPORTED_PAID"
+          ? "UNSUPPORTED_PAID"
+          : existing.syncStatus === "SYNCED" && incoming.syncStatus === "SYNCED"
+          ? "SYNCED"
+          : "IDLE";
+      const syncError =
+        [existing.syncError, incoming.syncError].filter(Boolean).join("; ") || null;
+      const lastSyncedAt =
+        existing.lastSyncedAt && incoming.lastSyncedAt
+          ? new Date(existing.lastSyncedAt) > new Date(incoming.lastSyncedAt)
+            ? existing.lastSyncedAt
+            : incoming.lastSyncedAt
+          : existing.lastSyncedAt || incoming.lastSyncedAt;
+      const unavailableMetrics = Array.from(
+        new Set([...existing.unavailableMetrics, ...incoming.unavailableMetrics])
+      );
+      const reportingDelayHours = Math.max(
+        existing.reportingDelayHours || 0,
+        incoming.reportingDelayHours || 0
+      );
+      return {
+        impressions: combinedImpressions,
+        reach: combinedReach,
+        engagements: combinedEngagements,
+        followers: combinedFollowers,
+        followerGrowth: combinedFollowerGrowth,
+        engagementRate: combinedEngagementRate,
+        postsCount: combinedPostsCount,
+        isMock,
+        source,
+        syncStatus,
+        syncError,
+        lastSyncedAt,
+        unavailableMetrics,
+        reportingDelayHours,
+      };
+    };
 
     for (const acc of accounts) {
       totalFollowers += acc.followersCount;
@@ -514,7 +602,11 @@ export class AnalyticsService {
       if (!acc.isMock && acc.platform === "X" && process.env.ALLOW_PAID_X_API !== "true") {
         sourcesSeen.add("UNSUPPORTED_PAID");
         workspaceUnavailableMetrics.add("X:all_paid_metrics");
-        byPlatform[acc.platform] = {
+        const xAccountItem: AccountBreakdownItem = {
+          accountId: acc.id,
+          username: acc.username,
+          displayName: acc.displayName,
+          platform: acc.platform,
           impressions: null,
           reach: null,
           engagements: null,
@@ -532,6 +624,12 @@ export class AnalyticsService {
           unavailableMetrics: ["impressions", "reach", "engagements", "followerGrowth"],
           reportingDelayHours: null,
         };
+        byAccount[acc.id] = xAccountItem;
+        accountsList.push(xAccountItem);
+        byPlatform[acc.platform] = mergeIntoPlatformBreakdown(
+          byPlatform[acc.platform],
+          xAccountItem
+        );
         continue;
       }
 
@@ -648,7 +746,11 @@ export class AnalyticsService {
           validSnapshots.length > 0 &&
           accAvailableSet.has("reach"));
 
-      byPlatform[acc.platform] = {
+      const accountItem: AccountBreakdownItem = {
+        accountId: acc.id,
+        username: acc.username,
+        displayName: acc.displayName,
+        platform: acc.platform,
         impressions: validSnapshots.length === 0 && !acc.isMock ? null : platImpressions,
         reach: !reachReported ? null : platReach,
         engagements: validSnapshots.length === 0 && !acc.isMock ? null : platEngagements,
@@ -664,6 +766,13 @@ export class AnalyticsService {
         unavailableMetrics: Array.from(new Set(accUnavailable)),
         reportingDelayHours: acc.isMock ? 0 : acc.platform === "YOUTUBE" ? 48 : 24,
       };
+
+      byAccount[acc.id] = accountItem;
+      accountsList.push(accountItem);
+      byPlatform[acc.platform] = mergeIntoPlatformBreakdown(
+        byPlatform[acc.platform],
+        accountItem
+      );
     }
 
     const overallEngagementRate =
@@ -706,11 +815,16 @@ export class AnalyticsService {
       unavailableMetrics: Array.from(workspaceUnavailableMetrics),
       totalImpressions,
       totalReach,
+      reachLabel: "Aggregated Daily Reach (Non-Deduplicated)",
+      reachDisclosure:
+        "Cross-platform and multi-day unique viewer deduplication is not supported by underlying social platform APIs. Total reach represents non-deduplicated daily aggregated reach.",
       totalEngagements,
       totalFollowers,
       followerGrowth: hasValidFollowerGrowth ? followerGrowthTotal : null,
       engagementRate: overallEngagementRate,
       byPlatform,
+      byAccount,
+      accounts: accountsList,
       dailyTimeline,
     };
   }

@@ -513,8 +513,10 @@ export class InstagramLiveProvider implements ISocialProvider {
     const sinceUnix = Math.floor(timeRange.startDate.getTime() / 1000);
     const untilUnix = Math.floor(timeRange.endDate.getTime() / 1000);
 
+    // Meta deprecated 'impressions' on Instagram in 2025 in favor of 'views'.
+    // Query currently supported metrics: views, reach, total_interactions, follower_count.
     const insightsUrl = new URL(`https://graph.instagram.com/v21.0/${igUserId}/insights`);
-    insightsUrl.searchParams.set("metric", "reach,impressions,total_interactions,follower_count");
+    insightsUrl.searchParams.set("metric", "views,reach,total_interactions,follower_count");
     insightsUrl.searchParams.set("period", "day");
     insightsUrl.searchParams.set("since", String(sinceUnix));
     insightsUrl.searchParams.set("until", String(untilUnix));
@@ -530,6 +532,18 @@ export class InstagramLiveProvider implements ISocialProvider {
         }
       }
       break;
+    }
+
+    // Graceful fallback: If an environment/mock specifically provides 'impressions' instead of 'views', try fallback
+    if (!res || !res.ok) {
+      const errText = res ? await res.text() : "No response";
+      if (res?.status === 400 && errText.toLowerCase().includes("views")) {
+        const fallbackUrl = new URL(insightsUrl.toString());
+        fallbackUrl.searchParams.set("metric", "reach,impressions,total_interactions,follower_count");
+        res = await fetch(fallbackUrl.toString());
+      } else {
+        throw new Error(`Instagram Graph Insights API request failed (${res?.status || 500}): ${errText}`);
+      }
     }
 
     if (!res || !res.ok) {
@@ -584,7 +598,7 @@ export class InstagramLiveProvider implements ISocialProvider {
           hasFollowerDelta: false,
         };
         const val = Number(point.value) || 0;
-        if (metricName === "impressions" || metricName === "views") {
+        if (metricName === "views" || metricName === "impressions") {
           entry.impressions = val;
         } else if (metricName === "reach") {
           entry.reach = val;
@@ -601,9 +615,11 @@ export class InstagramLiveProvider implements ISocialProvider {
     const availableMetrics: string[] = [];
     const unavailableMetrics: string[] = ["clicks"];
 
-    if (seenMetricNames.has("impressions") || seenMetricNames.has("views")) {
+    if (seenMetricNames.has("views") || seenMetricNames.has("impressions")) {
+      availableMetrics.push("views");
       availableMetrics.push("impressions");
     } else {
+      unavailableMetrics.push("views");
       unavailableMetrics.push("impressions");
     }
 

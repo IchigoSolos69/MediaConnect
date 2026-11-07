@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
         // Requires workspace OWNER permission
         await authorizeWorkspaceAccess(session.userId, requestedWorkspaceId, "workspace:manage");
         authorizedWorkspaceId = requestedWorkspaceId;
-      } catch (authErr) {
+      } catch (_authErr) {
         SecurityAudit.log({
           event: "DISPATCH_UNAUTHORIZED",
           ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1",

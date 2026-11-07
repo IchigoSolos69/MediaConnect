@@ -12,11 +12,11 @@ const METRIC_DEFINITIONS = [
       "Reported by YouTube Analytics API v2 (views) and Instagram Graph API (impressions). Disabled for paid X API.",
   },
   {
-    metric: "Unique Reach",
+    metric: "Aggregated Daily Reach (Non-Deduplicated)",
     definition:
-      "Distinct user accounts that viewed content at least once during the reporting period.",
+      "Sum of daily reach reported across connected channels. Underlying platform APIs do not support cross-platform or multi-day unique viewer deduplication.",
     availabilityNote:
-      "Provided by Instagram Graph API daily reach. Marked UNAVAILABLE for YouTube daily channel reports.",
+      "Provided by Instagram Graph API daily reach. Marked UNAVAILABLE for YouTube daily channel reports. Not deduplicated across channels or dates.",
   },
   {
     metric: "Total Engagements",
@@ -179,7 +179,7 @@ export function ReportView({
 
             <div className="p-4 bg-slate-900/80 print:bg-gray-50 border border-slate-800 print:border-gray-200 rounded-2xl">
               <span className="text-[10px] font-semibold text-slate-400 print:text-gray-600 uppercase block">
-                Unique Reach
+                Daily Reach (Non-Dedup)
               </span>
               <span className="text-lg font-bold text-white print:text-black block mt-1">
                 {formatNumber(totalReach)}
